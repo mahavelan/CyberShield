@@ -1,6 +1,6 @@
 # app.py
 """
-IntruDetect - Intrusion Detection Web App (complete)
+CYBER SHIELD(complete)
 Features:
 - Robust label detection + manual override
 - Supervised: Logistic Regression, Random Forest, SVM, KNN, Voting (hybrid)
