@@ -323,7 +323,7 @@ else:
                 labels = np.where(iso_pred==-1, "Attack", "Normal")
                 df_iso = df.copy(); df_iso['Pred_IsolationForest'] = labels
                 unsup_results['Isolation Forest'] = df_iso
-                percent_flagged['Isolation Forest'] = (labels=="Attack").sum()/len(labels)
+                percent_flagged['Isolation Forest'] = (labels=='Attack').sum()/len(labels)
 
             if "One-Class SVM" in chosen_unsup:
                 st.info("Running One-Class SVM...")
@@ -333,7 +333,7 @@ else:
                     labels = np.where(oc_pred==-1, "Attack", "Normal")
                     df_oc = df.copy(); df_oc['Pred_OneClassSVM'] = labels
                     unsup_results['One-Class SVM'] = df_oc
-                    percent_flagged['One-Class SVM'] = (labels=="Attack").sum()/len(labels)
+                    percent_flagged['One-Class SVM'] = (labels=='Attack').sum()/len(labels)
                 except Exception as ex:
                     st.error(f"One-Class SVM failed: {ex}")
 
@@ -361,7 +361,7 @@ else:
                     labels = np.where(rec_err>=thr, "Attack", "Normal")
                     df_ae = df.copy(); df_ae['AE_recon_err'] = rec_err; df_ae['Pred_AE'] = labels
                     unsup_results['Autoencoder'] = df_ae
-                    percent_flagged['Autoencoder'] = (labels=="Attack").sum()/len(labels)
+                    percent_flagged['Autoencoder'] = (labels=='Attack').sum()/len(labels)
                 except Exception as ex:
                     st.error(f"Autoencoder failed: {ex}")
 
@@ -388,7 +388,7 @@ else:
                         cons_df['consensus_score'] = flags.sum(axis=1)/len(flag_cols)
                         cons_df['Consensus_Pred'] = np.where(cons_df['consensus_score']>=0.5, "Attack", "Normal")
                         unsup_results['Consensus'] = cons_df
-                        percent_flagged['Consensus'] = (cons_df['Consensus_Pred']=="Attack').sum()/len(cons_df)
+                        percent_flagged['Consensus'] = (cons_df['Consensus_Pred']=='Attack').sum()/len(cons_df)
 
             # Visualizations: pie per model, and comparison bar of percent flagged
             st.header("Unsupervised Results & Visuals")
