@@ -346,7 +346,7 @@ else:
                     small = df_km['km_cluster'].value_counts().idxmin()
                     df_km['Pred_KMeans'] = np.where(df_km['km_cluster']==small, "Attack", "Normal")
                     unsup_results['KMeans'] = df_km
-                    percent_flagged['KMeans'] = (df_km['Pred_KMeans']=="Attack').sum()/len(df_km)
+                    percent_flagged['KMeans'] = (df_km['Pred_KMeans']=="Attack").sum()/len(df_km)
                 except Exception as ex:
                     st.error(f"KMeans failed: {ex}")
 
