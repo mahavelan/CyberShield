@@ -3,8 +3,5 @@ pandas
 numpy
 scikit-learn
 matplotlib
-plotly
-shap
 seaborn
-joblib
-tensorflow
+openpyxl
