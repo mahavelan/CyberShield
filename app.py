@@ -1,17 +1,13 @@
 # app.py
 """
-CYBER SHIELD — Mini Project Web App
------------------------------------
-Features:
-- Auto detect Supervised (Labeled) or Unsupervised (Unlabeled) dataset
-- Automatic preprocessing: missing values, encoding categoricals, scaling
-- Supervised models: Logistic Regression, Random Forest, SVM, KNN, Decision Tree, Naive Bayes
-- Unsupervised models: Isolation Forest, One-Class SVM, KMeans
-- Hybrid option: user selects multiple models → majority voting
-- Metrics: Accuracy, Precision, Recall, F1, RMSE (for supervised)
-- Attack/Normal counts + anomaly visualization (for unsupervised)
-- Visualization: heatmap, bar chart, pie chart, line plot, scatter plot, histogram
-- CSV download of predictions
+CYBER SHIELD (final, extended)
+- Auto-detect dataset type (supervised vs unsupervised)
+- Supervised: Logistic Regression, Decision Tree, KNN, Random Forest, SVM, Naive Bayes, Gradient Boosting, AdaBoost, MLP (Neural Net)
+- Unsupervised: Isolation Forest, One-Class SVM, KMeans, Autoencoder (if TF), Consensus, DBSCAN, PCA anomaly
+- Hybrid: user can choose multiple models for ensemble
+- Preprocessing: handle missing values, categorical encoding, scaling
+- Evaluation: Accuracy, Precision, Recall, F1, RMSE (supervised)
+- Visualization: heatmap, bar, pie, line, scatter, histogram
 """
 
 import streamlit as st
@@ -19,307 +15,338 @@ import pandas as pd
 import numpy as np
 import re
 import warnings
+
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, IsolationForest, VotingClassifier
-from sklearn.svm import SVC, OneClassSVM
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier, IsolationForest, VotingClassifier
+from sklearn.svm import SVC, OneClassSVM
 from sklearn.naive_bayes import GaussianNB
-from sklearn.cluster import KMeans
+from sklearn.neural_network import MLPClassifier
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, confusion_matrix
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 warnings.filterwarnings("ignore")
 
-st.set_page_config(page_title="CYBER SHIELD", layout="wide")
-st.title("🔎 CYBER SHIELD — Intrusion Detection Mini Project")
-
-st.markdown("""
-Upload your dataset (CSV/XLSX).  
-The app will **auto-detect** whether it is Supervised (Labeled) or Unsupervised (Unlabeled),  
-clean & preprocess it, then train models and show results with visualizations.
-""")
+# TensorFlow for autoencoder (optional)
+USE_TF = True
+try:
+    import tensorflow as tf
+    from tensorflow.keras import Sequential
+    from tensorflow.keras.layers import Dense, Input
+    from tensorflow.keras.optimizers import Adam
+except Exception:
+    USE_TF = False
 
 # ---------------------------
-# Helper: detect label column
+# Helpers
 # ---------------------------
 def find_label_candidates(df, keywords=None):
     if keywords is None:
         keywords = ["label", "class", "attack", "target", "category", "type", "y", "outcome", "result"]
     scores = {}
     for col in df.columns:
-        norm = re.sub(r'[^0-9a-zA-Z]', ' ', str(col)).lower().strip()
+        norm = re.sub(r"[^0-9a-zA-Z]", " ", str(col)).lower()
         score = sum(1 for kw in keywords if kw in norm)
         scores[col] = score
-    sorted_candidates = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return sorted_candidates
+    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return sorted_scores
 
-# ---------------------------
-# Preprocess function
-# ---------------------------
-def preprocess_df_for_model(df, drop_cols=None):
-    if drop_cols is None:
-        drop_cols = []
+def preprocess_features(df, drop_cols=None):
+    if drop_cols is None: drop_cols = []
     df_proc = df.copy()
-    # drop unwanted cols
     for c in drop_cols:
         if c in df_proc.columns:
             df_proc = df_proc.drop(columns=[c])
-    # handle missing
-    for col in df_proc.columns:
-        if df_proc[col].dtype in ["float64", "int64"]:
-            df_proc[col] = df_proc[col].fillna(df_proc[col].median())
-        else:
-            df_proc[col] = df_proc[col].fillna(df_proc[col].mode()[0])
-    # encode categoricals
-    cat_cols = df_proc.select_dtypes(include=["object", "category"]).columns.tolist()
-    if cat_cols:
+    cat_cols = df_proc.select_dtypes(include=["object","category"]).columns
+    if len(cat_cols) > 0:
         df_proc = pd.get_dummies(df_proc, columns=cat_cols, drop_first=True)
-    # scale
+    df_proc = df_proc.fillna(0)
     scaler = StandardScaler()
-    X = scaler.fit_transform(df_proc.values)
-    X_df = pd.DataFrame(X, columns=df_proc.columns)
-    return X_df, {"scaler": scaler, "feature_columns": df_proc.columns.tolist()}
+    X_scaled = scaler.fit_transform(df_proc)
+    return pd.DataFrame(X_scaled, columns=df_proc.columns)
+
+def build_autoencoder(n_features):
+    model = Sequential([
+        Dense(64, activation="relu", input_shape=(n_features,)),
+        Dense(max(8, n_features//4), activation="relu"),
+        Dense(64, activation="relu"),
+        Dense(n_features, activation="linear")
+    ])
+    model.compile(optimizer=Adam(1e-3), loss="mse")
+    return model
 
 # ---------------------------
-# Upload dataset
+# App UI
 # ---------------------------
-uploaded_file = st.file_uploader("📂 Upload your dataset", type=["csv", "xlsx"])
+st.set_page_config(page_title="Cyber Shield", layout="wide")
+st.title("🔎 CYBER SHIELD - Intrusion Detection Web App")
 
-if uploaded_file:
+uploaded_file = st.file_uploader("📂 Upload dataset (CSV/XLSX)", type=["csv","xlsx"])
+if not uploaded_file:
+    st.info("Upload dataset to begin.")
+    st.stop()
+
+# Load data
+try:
     if uploaded_file.name.endswith(".csv"):
         df = pd.read_csv(uploaded_file)
     else:
         df = pd.read_excel(uploaded_file)
+except Exception as e:
+    st.error(f"Error reading file: {e}")
+    st.stop()
 
-    st.subheader("📊 Dataset Preview")
-    st.dataframe(df.head())
+st.subheader("📊 Dataset Preview")
+st.dataframe(df.head())
 
-    # auto detect label
-    candidates = find_label_candidates(df)
+# Detect label column
+candidates = find_label_candidates(df)
+auto_label = candidates[0][0] if candidates and candidates[0][1] > 0 else None
+if auto_label and auto_label in df.columns:
+    label_col = auto_label
+    dataset_type = "Supervised"
+    st.success(f"Auto-detected label column: **{label_col}**")
+else:
     label_col = None
-    if candidates and candidates[0][1] > 0:
-        label_col = candidates[0][0]
+    dataset_type = "Unsupervised"
+    st.warning("No label column detected. Proceeding as Unsupervised dataset.")
 
-    # decide supervised/unsupervised
-    if label_col:
-        dataset_type = "Supervised"
-        st.success(f"✅ Detected as Supervised dataset (label column: **{label_col}**) ")
-    else:
-        dataset_type = "Unsupervised"
-        st.warning("⚠️ No label column detected. Proceeding as Unsupervised dataset.")
+# ---------------------------
+# Sidebar model selection
+# ---------------------------
+st.sidebar.header("⚙️ Model Options")
+viz_options = ["Heatmap","Bar Chart","Pie Chart","Line Chart","Scatter Plot","Histogram"]
 
-    # Sidebar controls
-    st.sidebar.header("⚙️ Model Options")
+if dataset_type == "Supervised":
+    sup_models = ["Logistic Regression","Decision Tree","KNN","Random Forest","SVM","Naive Bayes","Gradient Boosting","AdaBoost","MLP (Neural Net)"]
+    chosen_models = st.sidebar.multiselect("Choose Supervised Models", sup_models, default=["Logistic Regression"])
+    hybrid = st.sidebar.checkbox("Use Hybrid (ensemble of selected models)")
+    chosen_viz = st.sidebar.selectbox("Choose Visualization", viz_options)
+else:
+    unsup_models = ["Isolation Forest","One-Class SVM","KMeans","DBSCAN","PCA Anomaly"]
+    if USE_TF: unsup_models += ["Autoencoder"]
+    unsup_models += ["Consensus (hybrid)"]
+    chosen_models = st.sidebar.multiselect("Choose Unsupervised Models", unsup_models, default=["Isolation Forest"])
+    chosen_viz = st.sidebar.selectbox("Choose Visualization", viz_options)
+    contamination = st.sidebar.slider("Contamination (expected anomaly %)", 0.01,0.5,0.1,0.01)
+
+run = st.sidebar.button("🚀 Run Models")
+
+# ---------------------------
+# Run
+# ---------------------------
+if run:
     if dataset_type == "Supervised":
-        sup_models = ["Logistic Regression", "Random Forest", "SVM", "KNN", "Decision Tree", "Naive Bayes"]
-        chosen_sup = st.sidebar.multiselect("Select supervised models", sup_models, default=["Logistic Regression"])
-        hybrid = st.sidebar.checkbox("Enable Hybrid (combine multiple models)")
-    else:
-        unsup_models = ["Isolation Forest", "One-Class SVM", "KMeans"]
-        chosen_unsup = st.sidebar.multiselect("Select unsupervised models", unsup_models, default=["Isolation Forest"])
-        contamination = st.sidebar.slider("Estimated contamination (attack %)", 0.01, 0.5, 0.1, 0.01)
+        X = df.drop(columns=[label_col])
+        y = df[label_col]
 
-    # Visualization choice
-    viz_options = ["Heatmap", "Bar Chart", "Pie Chart", "Line Plot", "Scatter Plot", "Histogram"]
-    chosen_viz = st.sidebar.selectbox("📈 Choose visualization type", viz_options)
+        if y.dtype == "object" or y.dtype.name == "category":
+            y, uniques = pd.factorize(y)
 
-    st.sidebar.markdown("---")
-    run = st.sidebar.button("🚀 Run Models")
+        X_proc = preprocess_features(X)
+        X_train, X_test, y_train, y_test = train_test_split(X_proc, y, test_size=0.3, random_state=42, stratify=y)
 
-    if run:
-        st.info("🔄 Preprocessing data...")
-        if dataset_type == "Supervised":
-            X = df.drop(columns=[label_col]).copy()
-            y = df[label_col].copy()
-            if y.dtype == "object" or y.dtype.name == "category":
-                y, uniques = pd.factorize(y)
-            else:
-                y = pd.to_numeric(y, errors="coerce")
-                y = y.fillna(0).replace([np.inf, -np.inf], 0)
-                y = y.astype(int)
-        else:
-            X = df.copy()
-            y = None
+        results = {}
+        metrics = {}
+        models_dict = {
+            "Logistic Regression": LogisticRegression(max_iter=1000),
+            "Decision Tree": DecisionTreeClassifier(),
+            "KNN": KNeighborsClassifier(),
+            "Random Forest": RandomForestClassifier(),
+            "SVM": SVC(probability=True),
+            "Naive Bayes": GaussianNB(),
+            "Gradient Boosting": GradientBoostingClassifier(),
+            "AdaBoost": AdaBoostClassifier(),
+            "MLP (Neural Net)": MLPClassifier(max_iter=500)
+        }
 
-        X_processed, pipe_info = preprocess_df_for_model(X)
+        estimators = []
+        for name in chosen_models:
+            st.info(f"Training {name}...")
+            model = models_dict[name]
+            model.fit(X_train, y_train)
+            yp = model.predict(X_test)
+            results[name] = yp
+            estimators.append((name, model))
+            metrics[name] = {
+                "Accuracy": accuracy_score(y_test, yp),
+                "Precision": precision_score(y_test, yp, average="weighted", zero_division=0),
+                "Recall": recall_score(y_test, yp, average="weighted", zero_division=0),
+                "F1": f1_score(y_test, yp, average="weighted", zero_division=0),
+                "RMSE": mean_squared_error(y_test, yp, squared=False)
+            }
 
-        # ---------------------------
-        # SUPERVISED
-        # ---------------------------
-        if dataset_type == "Supervised":
-            X_train, X_test, y_train, y_test = train_test_split(X_processed, y, test_size=0.3, random_state=42, stratify=y)
-            metrics_summary = {}
-            preds_store = {}
+        if hybrid and len(estimators) > 1:
+            st.info("Running Hybrid Ensemble...")
+            vote = VotingClassifier(estimators=estimators, voting="soft")
+            vote.fit(X_train,y_train)
+            yp = vote.predict(X_test)
+            results["Hybrid Ensemble"] = yp
+            metrics["Hybrid Ensemble"] = {
+                "Accuracy": accuracy_score(y_test, yp),
+                "Precision": precision_score(y_test, yp, average="weighted", zero_division=0),
+                "Recall": recall_score(y_test, yp, average="weighted", zero_division=0),
+                "F1": f1_score(y_test, yp, average="weighted", zero_division=0),
+                "RMSE": mean_squared_error(y_test, yp, squared=False)
+            }
 
-            def evaluate_model(name, model):
-                model.fit(X_train, y_train)
-                yp = model.predict(X_test)
-                preds_store[name] = yp
-                acc = accuracy_score(y_test, yp)
-                prec = precision_score(y_test, yp, average="weighted", zero_division=0)
-                rec = recall_score(y_test, yp, average="weighted", zero_division=0)
-                f1 = f1_score(y_test, yp, average="weighted", zero_division=0)
-                rmse = np.sqrt(mean_squared_error(y_test, yp))
-                metrics_summary[name] = (acc, prec, rec, f1, rmse)
+        st.subheader("📈 Metrics Summary")
+        st.dataframe(pd.DataFrame(metrics).T)
 
-            if "Logistic Regression" in chosen_sup:
-                evaluate_model("Logistic Regression", LogisticRegression(max_iter=1000))
-            if "Random Forest" in chosen_sup:
-                evaluate_model("Random Forest", RandomForestClassifier(n_estimators=100, random_state=42))
-            if "SVM" in chosen_sup:
-                evaluate_model("SVM", SVC(kernel="rbf"))
-            if "KNN" in chosen_sup:
-                evaluate_model("KNN", KNeighborsClassifier(n_neighbors=5))
-            if "Decision Tree" in chosen_sup:
-                evaluate_model("Decision Tree", DecisionTreeClassifier(random_state=42))
-            if "Naive Bayes" in chosen_sup:
-                evaluate_model("Naive Bayes", GaussianNB())
-
-            # Hybrid voting
-            if hybrid and len(chosen_sup) > 1:
-                estimators = []
-                if "Logistic Regression" in chosen_sup:
-                    estimators.append(("lr", LogisticRegression(max_iter=1000)))
-                if "Random Forest" in chosen_sup:
-                    estimators.append(("rf", RandomForestClassifier(n_estimators=100, random_state=42)))
-                if "SVM" in chosen_sup:
-                    estimators.append(("svm", SVC(kernel="rbf", probability=True)))
-                if "KNN" in chosen_sup:
-                    estimators.append(("knn", KNeighborsClassifier(n_neighbors=5)))
-                if "Decision Tree" in chosen_sup:
-                    estimators.append(("dt", DecisionTreeClassifier(random_state=42)))
-                if "Naive Bayes" in chosen_sup:
-                    estimators.append(("nb", GaussianNB()))
-                vote = VotingClassifier(estimators=estimators, voting="hard")
-                evaluate_model("Hybrid Voting", vote)
-
-            # Show results
-            st.subheader("📊 Supervised Results — Metrics")
-            metrics_df = pd.DataFrame.from_dict(
-                {m: {"Accuracy": v[0], "Precision": v[1], "Recall": v[2], "F1": v[3], "RMSE": v[4]} for m, v in metrics_summary.items()},
-                orient="index"
-            )
-            st.table(metrics_df.round(3))
-
-            # Confusion matrix + visualization
-            for name, yp in preds_store.items():
-                st.markdown(f"### {name} — Confusion Matrix")
+        # Visualization
+        if chosen_viz == "Heatmap":
+            for name, yp in results.items():
                 cm = confusion_matrix(y_test, yp)
                 fig, ax = plt.subplots()
                 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
                 st.pyplot(fig)
+        elif chosen_viz == "Bar Chart":
+            dfm = pd.DataFrame(metrics).T
+            dfm["Accuracy"].plot(kind="bar", legend=False)
+            st.pyplot(plt.gcf())
+        elif chosen_viz == "Pie Chart":
+            cm = confusion_matrix(y_test, list(results.values())[0])
+            vals = [cm[0,0]+cm[0,1], cm[1,0]+cm[1,1]]
+            plt.pie(vals, labels=["Class0","Class1"], autopct="%1.1f%%")
+            st.pyplot(plt.gcf())
+        elif chosen_viz == "Line Chart":
+            pd.DataFrame(metrics).T[["Accuracy","F1"]].plot(kind="line", marker="o")
+            st.pyplot(plt.gcf())
+        elif chosen_viz == "Scatter Plot":
+            dfm = pd.DataFrame(metrics).T
+            plt.scatter(dfm["Accuracy"], dfm["F1"])
+            plt.xlabel("Accuracy"); plt.ylabel("F1")
+            st.pyplot(plt.gcf())
+        elif chosen_viz == "Histogram":
+            pd.DataFrame(metrics).T["Accuracy"].plot(kind="hist", bins=5)
+            st.pyplot(plt.gcf())
 
-            # Visualization option
-            st.subheader("📈 Visualization")
-            if chosen_viz == "Bar Chart":
-                metrics_df["Accuracy"].plot(kind="bar")
-                plt.ylabel("Accuracy")
-                st.pyplot(plt)
-            elif chosen_viz == "Pie Chart":
-                sizes = metrics_df["Accuracy"]
-                plt.pie(sizes, labels=metrics_df.index, autopct="%1.1f%%")
-                st.pyplot(plt)
-            elif chosen_viz == "Line Plot":
-                metrics_df["Accuracy"].plot(kind="line", marker="o")
-                st.pyplot(plt)
-            elif chosen_viz == "Scatter Plot":
-                plt.scatter(metrics_df.index, metrics_df["Accuracy"])
-                plt.ylabel("Accuracy")
-                st.pyplot(plt)
-            elif chosen_viz == "Histogram":
-                plt.hist(metrics_df["Accuracy"], bins=5)
-                plt.xlabel("Accuracy")
-                st.pyplot(plt)
+    # ---------------------------
+    # Unsupervised
+    # ---------------------------
+    else:
+        X_proc = preprocess_features(df)
+        X_vals = X_proc.values
+        unsup_results = {}
+        percent_flagged = {}
 
-        # ---------------------------
-        # UNSUPERVISED
-        # ---------------------------
-        else:
-            results_unsup = {}
-            percent_flagged = {}
+        if "Isolation Forest" in chosen_models:
+            iso = IsolationForest(contamination=contamination, random_state=42)
+            pred = iso.fit_predict(X_vals)
+            labels = np.where(pred==-1,"Attack","Normal")
+            df_iso = df.copy(); df_iso["Pred_IsolationForest"] = labels
+            unsup_results["Isolation Forest"] = df_iso
+            percent_flagged["Isolation Forest"] = (labels=="Attack").sum()/len(labels)
 
-            if "Isolation Forest" in chosen_unsup:
-                iso = IsolationForest(contamination=contamination, random_state=42)
-                pred = iso.fit_predict(X_processed)
-                labels = np.where(pred == -1, "Attack", "Normal")
-                df_out = df.copy()
-                df_out["Prediction"] = labels
-                results_unsup["Isolation Forest"] = df_out
-                percent_flagged["Isolation Forest"] = (labels == "Attack").sum() / len(labels)
+        if "One-Class SVM" in chosen_models:
+            oc = OneClassSVM(nu=contamination, kernel="rbf", gamma="scale")
+            pred = oc.fit_predict(X_vals)
+            labels = np.where(pred==-1,"Attack","Normal")
+            df_oc = df.copy(); df_oc["Pred_OneClassSVM"] = labels
+            unsup_results["One-Class SVM"] = df_oc
+            percent_flagged["One-Class SVM"] = (labels=="Attack").sum()/len(labels)
 
-            if "One-Class SVM" in chosen_unsup:
-                oc = OneClassSVM(nu=contamination, kernel="rbf", gamma="scale")
-                pred = oc.fit_predict(X_processed)
-                labels = np.where(pred == -1, "Attack", "Normal")
-                df_out = df.copy()
-                df_out["Prediction"] = labels
-                results_unsup["One-Class SVM"] = df_out
-                percent_flagged["One-Class SVM"] = (labels == "Attack").sum() / len(labels)
+        if "KMeans" in chosen_models:
+            km = KMeans(n_clusters=2, random_state=42)
+            clusters = km.fit_predict(X_vals)
+            small = pd.Series(clusters).value_counts().idxmin()
+            labels = np.where(clusters==small,"Attack","Normal")
+            df_km = df.copy(); df_km["Pred_KMeans"] = labels
+            unsup_results["KMeans"] = df_km
+            percent_flagged["KMeans"] = (labels=="Attack").sum()/len(labels)
 
-            if "KMeans" in chosen_unsup:
-                km = KMeans(n_clusters=2, random_state=42)
-                clusters = km.fit_predict(X_processed)
-                small = pd.Series(clusters).value_counts().idxmin()
-                labels = np.where(clusters == small, "Attack", "Normal")
-                df_out = df.copy()
-                df_out["Prediction"] = labels
-                results_unsup["KMeans"] = df_out
-                percent_flagged["KMeans"] = (labels == "Attack").sum() / len(labels)
+        if "DBSCAN" in chosen_models:
+            db = DBSCAN(eps=0.5, min_samples=5).fit(X_vals)
+            labels = np.where(db.labels_==-1,"Attack","Normal")
+            df_db = df.copy(); df_db["Pred_DBSCAN"] = labels
+            unsup_results["DBSCAN"] = df_db
+            percent_flagged["DBSCAN"] = (labels=="Attack").sum()/len(labels)
 
-            st.subheader("📊 Unsupervised Results")
-            for name, df_out in results_unsup.items():
-                st.write(f"### {name}")
-                st.dataframe(df_out.head())
-                vc = df_out["Prediction"].value_counts()
-                attacks = vc.get("Attack", 0)
-                normals = vc.get("Normal", 0)
-                st.success(f"🔴 Attacks: {attacks}, 🟢 Normal: {normals}")
+        if "PCA Anomaly" in chosen_models:
+            pca = PCA(n_components=2)
+            X_p = pca.fit_transform(X_vals)
+            rec = pca.inverse_transform(X_p)
+            err = np.mean((X_vals - rec)**2, axis=1)
+            thr = np.percentile(err, 100*(1-contamination))
+            labels = np.where(err>=thr,"Attack","Normal")
+            df_pca = df.copy(); df_pca["Pred_PCA"] = labels
+            unsup_results["PCA Anomaly"] = df_pca
+            percent_flagged["PCA Anomaly"] = (labels=="Attack").sum()/len(labels)
 
-                # Visualization
-                if chosen_viz == "Pie Chart":
-                    plt.pie([attacks, normals], labels=["Attack", "Normal"], autopct="%1.1f%%", colors=["red", "green"])
-                    st.pyplot(plt)
-                elif chosen_viz == "Bar Chart":
-                    plt.bar(["Attack", "Normal"], [attacks, normals], color=["red", "green"])
-                    st.pyplot(plt)
-                elif chosen_viz == "Line Plot":
-                    plt.plot(["Attack", "Normal"], [attacks, normals], marker="o")
-                    st.pyplot(plt)
-                elif chosen_viz == "Scatter Plot":
-                    plt.scatter(["Attack", "Normal"], [attacks, normals], color=["red", "green"])
-                    st.pyplot(plt)
-                elif chosen_viz == "Histogram":
-                    plt.hist([attacks, normals], bins=2)
-                    st.pyplot(plt)
-                elif chosen_viz == "Heatmap":
-                    cm = np.array([[attacks, normals]])
-                    sns.heatmap(cm, annot=True, fmt="d", cmap="coolwarm")
-                    st.pyplot(plt)
+        if USE_TF and "Autoencoder" in chosen_models:
+            ae = build_autoencoder(X_vals.shape[1])
+            ae.fit(X_vals,X_vals,epochs=10,batch_size=64,verbose=0)
+            rec = ae.predict(X_vals)
+            err = np.mean((X_vals - rec)**2, axis=1)
+            thr = np.percentile(err, 100*(1-contamination))
+            labels = np.where(err>=thr,"Attack","Normal")
+            df_ae = df.copy(); df_ae["Pred_AE"] = labels
+            unsup_results["Autoencoder"] = df_ae
+            percent_flagged["Autoencoder"] = (labels=="Attack").sum()/len(labels)
 
-            if percent_flagged:
-                st.subheader("Comparison — % flagged as Attack")
-                comp_df = pd.DataFrame.from_dict({k: v for k, v in percent_flagged.items()}, orient="index", columns=["% Attack"])
-                st.table((comp_df * 100).round(2))
+        if "Consensus (hybrid)" in chosen_models and len(unsup_results)>0:
+            cons = df.copy()
+            flag_cols = []
+            for name, dfm in unsup_results.items():
+                col = [c for c in dfm.columns if c.startswith("Pred_")][0]
+                cons[name] = dfm[col]
+                flag_cols.append(name)
+            flags = cons[flag_cols].applymap(lambda x: 1 if str(x).lower().startswith("attack") else 0)
+            cons["Consensus_Pred"] = np.where(flags.mean(axis=1)>=0.5,"Attack","Normal")
+            unsup_results["Consensus"] = cons
+            percent_flagged["Consensus"] = (cons["Consensus_Pred"]=="Attack").sum()/len(cons)
+
+        st.subheader("📊 Unsupervised Results")
+        st.dataframe(pd.DataFrame(percent_flagged, index=["% Attacks"]).T*100)
+
+        # Visualization
+        if chosen_viz == "Pie Chart":
+            for name, df_out in unsup_results.items():
+                pcol = [c for c in df_out.columns if c.startswith("Pred_")][-1]
+                vc = df_out[pcol].value_counts()
+                plt.pie(vc, labels=vc.index, autopct="%1.1f%%", colors=["red","green"])
+                plt.title(name)
+                st.pyplot(plt.gcf())
+        elif chosen_viz == "Bar Chart":
+            pd.Series(percent_flagged).plot(kind="bar")
+            plt.ylabel("% Attack")
+            st.pyplot(plt.gcf())
+        elif chosen_viz == "Line Chart":
+            pd.Series(percent_flagged).plot(kind="line", marker="o")
+            plt.ylabel("% Attack")
+            st.pyplot(plt.gcf())
+        elif chosen_viz == "Scatter Plot":
+            vals = pd.Series(percent_flagged)
+            plt.scatter(vals.index, vals.values)
+            plt.ylabel("% Attack"); plt.xticks(rotation=45)
+            st.pyplot(plt.gcf())
+        elif chosen_viz == "Histogram":
+            vals = pd.Series(percent_flagged)
+            vals.plot(kind="hist", bins=5)
+            st.pyplot(plt.gcf())
+        elif chosen_viz == "Heatmap":
+            vals = pd.Series(percent_flagged).to_frame("Attack%")
+            sns.heatmap(vals, annot=True, cmap="Reds")
+            st.pyplot(plt.gcf())
 
 # ---------------------------
-# HELP
+# Help
 # ---------------------------
 st.markdown("---")
-with st.expander("📘 Help & Quickstart"):
+with st.expander("📘 Help & Guide"):
     st.write("""
-    **Steps to use CYBER SHIELD:**
-    1. Upload dataset (CSV/XLSX).
-    2. App auto-detects if dataset is Supervised or Unsupervised.
-    3. Choose models from sidebar.
-    4. Choose visualization format.
-    5. Press "Run Models".
+    Steps to use:
+    1. Upload CSV/XLSX dataset.
+    2. App auto-detects if dataset is **Supervised (labeled)** or **Unsupervised (unlabeled)**.
+    3. Select models and visualization type from sidebar.
+    4. Press **Run Models**.
+    5. View metrics (supervised) or anomaly counts (unsupervised).
     6. Download predictions if needed.
-
-    - Supervised → shows Accuracy, Precision, Recall, F1, RMSE, confusion matrices.
-    - Unsupervised → shows Attacks/Normal counts, anomaly detection.
-    - Hybrid → majority voting across selected models.
     """)
