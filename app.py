@@ -138,7 +138,9 @@ if uploaded_file:
             if y.dtype == "object" or y.dtype.name == "category":
                 y, uniques = pd.factorize(y)
             else:
-                y = pd.to_numeric(y, errors="coerce").fillna(0).astype(int)
+                y = pd.to_numeric(y, errors="coerce")
+                y = y.fillna(0).replace([np.inf, -np.inf], 0)
+                y = y.astype(int)
         else:
             X = df.copy()
             y = None
