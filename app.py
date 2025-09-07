@@ -1,321 +1,299 @@
-# app.py
-# CYBERSHIELD — Auto Supervised/Unsupervised • Hybrid • Classic + Deep Models • Rich Visuals
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Silence TensorFlow logs
 
-import re, warnings
+import streamlit as st
+import pandas as pd
+import numpy as np
+import re
+import warnings
 warnings.filterwarnings("ignore")
 
-import numpy as np
-import pandas as pd
-import streamlit as st
-
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.impute import SimpleImputer
-
-# Supervised (classic ML)
 from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier, VotingClassifier
-from sklearn.naive_bayes import GaussianNB
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
+from sklearn.svm import SVC, OneClassSVM
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC
-from sklearn.neural_network import MLPClassifier
-
-# Unsupervised
-from sklearn.ensemble import IsolationForest
-from sklearn.svm import OneClassSVM
+from sklearn.naive_bayes import GaussianNB
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.cluster import KMeans, DBSCAN
-from sklearn.decomposition import PCA
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, mean_squared_error
 
-# Metrics
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, mean_squared_error
-)
-
-# Visualization
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Optional Deep Learning
+# Try importing TensorFlow (for deep learning models)
 USE_TF = True
 try:
     import tensorflow as tf
     from tensorflow.keras import Sequential
-    from tensorflow.keras.layers import Dense, Conv1D, MaxPooling1D, Flatten, Dropout, Input, LSTM, Bidirectional, Attention
+    from tensorflow.keras.layers import Dense, Conv1D, MaxPooling1D, Flatten, LSTM, Input, Dropout
     from tensorflow.keras.optimizers import Adam
-    tf.get_logger().setLevel("ERROR")
 except Exception:
     USE_TF = False
 
-# --------------------------------------------------------------------------------------
-# Streamlit Setup
-# --------------------------------------------------------------------------------------
-st.set_page_config(page_title="CYBERSHIELD", layout="wide")
-st.title("🔐 CYBERSHIELD — Auto Supervised/Unsupervised Detection")
+# Streamlit page setup
+st.set_page_config(page_title="CyberShield", layout="wide")
+st.title("🛡️ CyberShield Web App")
+st.write("Upload your dataset. The app will auto-detect if it is **Supervised** or **Unsupervised**, preprocess it, and run ML/DL models.")
 
-st.write(
-    "Upload a dataset. The app **auto-detects** if it's **Supervised** "
-    "(strict label column present) or **Unsupervised** (no label). "
-    "You then select models and visualization types."
-)
-
-# --------------------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------------------
-STRICT_LABEL_NAMES = {"label","class","target","attack","y","output","result"}
-
-def normalize_colname(name: str) -> str:
-    s = re.sub(r"[^0-9a-zA-Z]+", "_", str(name).strip().lower())
-    return s.strip("_")
-
-def find_strict_label_column(df: pd.DataFrame):
-    normalized = {col: normalize_colname(col) for col in df.columns}
-    for col, norm in normalized.items():
-        compact = norm.replace("_","")
-        if norm in STRICT_LABEL_NAMES or compact in STRICT_LABEL_NAMES:
+# --------------------
+# Helper functions
+# --------------------
+def find_label_column(df):
+    """Try to auto-detect label column from common names."""
+    label_keywords = ["label", "class", "target", "y", "attack", "category", "outcome"]
+    for col in df.columns:
+        if any(kw in col.lower() for kw in label_keywords):
             return col
     return None
 
-def safe_numeric_cast(series: pd.Series):
-    try:
-        vals = pd.to_numeric(series, errors="coerce")
-        return vals.fillna(0).astype(int), True
-    except Exception:
-        return series.copy(), False
-
-def build_deep_mlp(input_dim: int):
-    model = Sequential([
-        Input(shape=(input_dim,)),
-        Dense(128, activation="relu"),
-        Dropout(0.2),
-        Dense(64, activation="relu"),
-        Dense(1, activation="sigmoid")
-    ])
-    model.compile(optimizer=Adam(1e-3), loss="binary_crossentropy", metrics=["accuracy"])
-    return model
-
-def build_cnn_1d(input_len: int):
-    model = Sequential([
-        Input(shape=(input_len,1)),
-        Conv1D(32,3,activation="relu"),
-        MaxPooling1D(2),
-        Conv1D(64,3,activation="relu"),
-        MaxPooling1D(2),
-        Flatten(),
-        Dense(64,activation="relu"),
-        Dropout(0.2),
-        Dense(1,activation="sigmoid")
-    ])
-    model.compile(optimizer=Adam(1e-3), loss="binary_crossentropy", metrics=["accuracy"])
-    return model
-
-def build_lstm(input_len: int, bidirectional=False, use_attention=False):
-    layers = [Input(shape=(input_len,1))]
-    if bidirectional:
-        layers.append(Bidirectional(LSTM(64, return_sequences=use_attention)))
+def preprocess_data(df, label_col=None):
+    """Preprocess dataset automatically: handle NaNs, encode categoricals, scale features."""
+    df = df.copy()
+    df = df.dropna(axis=1, how="all")  # drop fully empty columns
+    df = df.fillna(0)  # fill remaining NaNs
+    
+    if label_col:
+        X = df.drop(columns=[label_col])
+        y = df[label_col]
     else:
-        layers.append(LSTM(64, return_sequences=use_attention))
-    if use_attention:
-        layers.append(Attention())
-        layers.append(Flatten())
-    layers.append(Dense(64,activation="relu"))
-    layers.append(Dropout(0.2))
-    layers.append(Dense(1,activation="sigmoid"))
-    model = Sequential(layers)
-    model.compile(optimizer=Adam(1e-3), loss="binary_crossentropy", metrics=["accuracy"])
-    return model
+        X = df
+        y = None
 
-def build_autoencoder(n_features: int):
-    model = Sequential([
-        Input(shape=(n_features,)),
-        Dense(128,activation="relu"),
-        Dense(max(16,n_features//4),activation="relu"),
-        Dense(128,activation="relu"),
-        Dense(n_features,activation="linear")
-    ])
-    model.compile(optimizer=Adam(1e-3), loss="mse")
-    return model
+    # Encode categoricals
+    cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
+    if cat_cols:
+        X = pd.get_dummies(X, columns=cat_cols, drop_first=True)
 
-def compute_metrics(y_true,y_pred):
-    acc = accuracy_score(y_true,y_pred)
-    prec = precision_score(y_true,y_pred,average="weighted",zero_division=0)
-    rec = recall_score(y_true,y_pred,average="weighted",zero_division=0)
-    f1 = f1_score(y_true,y_pred,average="weighted",zero_division=0)
-    rmse = mean_squared_error(y_true,y_pred,squared=False)
-    return acc,prec,rec,f1,rmse
-
-def draw_visualizations(df, graph_types, title, x=None, y=None, hue=None):
-    for g in graph_types:
-        st.write(f"### {title} — {g}")
-        fig, ax = plt.subplots()
-        try:
-            if g=="Bar":
-                if y: sns.barplot(data=df,x=x,y=y,hue=hue,ax=ax)
-                else: df.sum(numeric_only=True).plot(kind="bar",ax=ax)
-            elif g=="Pie":
-                vc = df[y].value_counts() if y else df.iloc[:,0].value_counts()
-                ax.pie(vc.values,labels=vc.index,autopct="%1.1f%%")
-            elif g=="Heatmap":
-                cm = df.corr(numeric_only=True)
-                sns.heatmap(cm,annot=False,cmap="Blues",ax=ax)
-            elif g=="Line":
-                if x and y: sns.lineplot(data=df,x=x,y=y,hue=hue,ax=ax)
-                else: df.reset_index(drop=True).plot(ax=ax)
-            elif g=="Scatter":
-                if x and y: sns.scatterplot(data=df,x=x,y=y,hue=hue,ax=ax)
-            elif g=="Boxplot":
-                if y: sns.boxplot(data=df,x=x,y=y,hue=hue,ax=ax)
-                else: sns.boxplot(data=df.select_dtypes(include=np.number),ax=ax)
-            elif g=="Histogram":
-                if y: sns.histplot(data=df,x=y,hue=hue,kde=True,ax=ax)
-                else: df.select_dtypes(include=np.number).hist(ax=ax)
-            st.pyplot(fig)
-        except Exception as e:
-            st.warning(f"Could not render {g}: {e}")
-        finally:
-            plt.close(fig)
-
-# --------------------------------------------------------------------------------------
-# Upload
-# --------------------------------------------------------------------------------------
-uploaded = st.file_uploader("Upload your dataset (CSV/XLSX)", type=["csv","xlsx"])
-if not uploaded: st.stop()
-
-try:
-    if uploaded.name.endswith(".csv"): df = pd.read_csv(uploaded)
-    else: df = pd.read_excel(uploaded)
-except Exception as e:
-    st.error(f"Error reading file: {e}"); st.stop()
-
-st.write("### Dataset Preview", df.head())
-
-# Detect supervised/unsupervised
-label_col = find_strict_label_column(df)
-dataset_type = "Supervised" if label_col else "Unsupervised"
-st.info(f"Auto-detected as **{dataset_type}** dataset.")
-if label_col: st.success(f"Using label column: **{label_col}**")
-
-# --------------------------------------------------------------------------------------
-# Sidebar Options
-# --------------------------------------------------------------------------------------
-st.sidebar.header("⚙️ Model Options")
-
-# Graph choices
-graph_choices = st.sidebar.multiselect("Select Visualization Types",
-    ["Bar","Pie","Heatmap","Line","Scatter","Boxplot","Histogram"],
-    default=["Bar","Pie","Heatmap"])
-
-if dataset_type=="Supervised":
-    sup_models = [
-        "Logistic Regression","Decision Tree","Random Forest","Gradient Boosting","AdaBoost",
-        "Naive Bayes","KNN","SVM","MLP"
-    ]
-    if USE_TF: sup_models += ["Deep MLP","1D-CNN","BiLSTM","BiLSTM+Attention","Autoencoder-Finetune"]
-    hybrid = st.sidebar.checkbox("Use Hybrid (Voting Ensemble)?")
-    chosen = st.sidebar.multiselect("Choose Models", sup_models, default=["Logistic Regression"])
-else:
-    unsup_models = ["Isolation Forest","One-Class SVM","KMeans","DBSCAN","PCA"]
-    if USE_TF: unsup_models += ["Autoencoder"]
-    hybrid = st.sidebar.checkbox("Use Hybrid (Consensus)?")
-    chosen = st.sidebar.multiselect("Choose Models", unsup_models, default=["Isolation Forest"])
-    contamination = st.sidebar.slider("Anomaly fraction",0.01,0.5,0.05,0.01)
-
-run = st.sidebar.button("🚀 Run Models")
-
-# --------------------------------------------------------------------------------------
-# Run
-# --------------------------------------------------------------------------------------
-if run:
-    X = df.drop(columns=[label_col]) if label_col else df.copy()
-    y = df[label_col] if label_col else None
-
-    # Preprocess
-    X = X.fillna(0)
-    X = pd.get_dummies(X, drop_first=True)
+    # Scale
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    X_scaled = scaler.fit_transform(X.values)
+    return pd.DataFrame(X_scaled, columns=X.columns), y
 
-    if dataset_type=="Supervised":
-        # encode y
-        if y.dtype=="object" or y.dtype.name=="category": y_enc = LabelEncoder().fit_transform(y)
+def plot_visualization(graph_type, y_true=None, y_pred=None, labels=None):
+    """Generate selected visualizations."""
+    fig, ax = plt.subplots()
+
+    if graph_type == "Confusion Matrix" and y_true is not None and y_pred is not None:
+        cm = confusion_matrix(y_true, y_pred)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
+        ax.set_title("Confusion Matrix")
+
+    elif graph_type == "Bar Chart" and labels is not None:
+        vc = pd.Series(labels).value_counts()
+        vc.plot(kind="bar", ax=ax, color=["red", "green"])
+        ax.set_ylabel("Count")
+        ax.set_title("Bar Chart of Predictions")
+
+    elif graph_type == "Pie Chart" and labels is not None:
+        vc = pd.Series(labels).value_counts()
+        ax.pie(vc, labels=vc.index, autopct="%1.1f%%", colors=["red", "green"])
+        ax.set_title("Pie Chart of Predictions")
+
+    elif graph_type == "Line Chart" and labels is not None:
+        pd.Series(labels).reset_index(drop=True).plot(kind="line", ax=ax)
+        ax.set_ylabel("Predictions")
+        ax.set_title("Line Chart of Predictions")
+
+    elif graph_type == "Histogram" and labels is not None:
+        pd.Series(labels).plot(kind="hist", bins=10, ax=ax, color="blue")
+        ax.set_title("Histogram of Predictions")
+
+    elif graph_type == "Box Plot" and labels is not None:
+        pd.Series(labels).plot(kind="box", ax=ax)
+        ax.set_title("Box Plot of Predictions")
+
+    st.pyplot(fig)
+
+# --------------------
+# File Upload
+# --------------------
+uploaded = st.file_uploader("Upload CSV or Excel dataset", type=["csv", "xlsx"])
+
+if uploaded:
+    try:
+        if uploaded.name.endswith(".csv"):
+            df = pd.read_csv(uploaded)
         else:
-            y_enc,_ = safe_numeric_cast(y)
-        X_train,X_test,y_train,y_test = train_test_split(X_scaled,y_enc,test_size=0.3,random_state=42,stratify=y_enc)
+            df = pd.read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        st.stop()
 
-        results = {}
-        if not hybrid:
-            if len(chosen)!=1: st.error("Select exactly ONE model for non-hybrid."); st.stop()
+    st.write("### Dataset Preview")
+    st.dataframe(df.head())
+
+    # Auto-detect label column
+    label_col = find_label_column(df)
+    if label_col:
+        st.success(f"Auto-detected label column: **{label_col}** → Supervised learning")
+        dataset_type = "Supervised"
+    else:
+        st.warning("No label column detected → Unsupervised learning")
+        dataset_type = "Unsupervised"
+
+    # --------------------
+    # Sidebar controls
+    # --------------------
+    st.sidebar.header("⚙️ Options")
+
+    # Model selection logic
+    hybrid_mode = st.sidebar.checkbox("Enable Hybrid (Multiple Models)?", value=False)
+
+    if dataset_type == "Supervised":
+        supervised_models = [
+            "Logistic Regression", "Random Forest", "Decision Tree", "KNN", "SVM",
+            "Naive Bayes", "Gradient Boosting", "AdaBoost"
+        ]
+        if USE_TF:
+            supervised_models += ["CNN", "LSTM"]
+
+        if hybrid_mode:
+            chosen_models = st.sidebar.multiselect("Choose Supervised Models", supervised_models)
         else:
-            if len(chosen)<2: st.error("Select at least TWO models for hybrid."); st.stop()
-
-        estimators = []
-        for name in chosen:
-            if name=="Logistic Regression":
-                m=LogisticRegression(max_iter=1000); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif name=="Decision Tree":
-                m=DecisionTreeClassifier(); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif name=="Random Forest":
-                m=RandomForestClassifier(n_estimators=100); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif name=="Gradient Boosting":
-                m=GradientBoostingClassifier(); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif name=="AdaBoost":
-                m=AdaBoostClassifier(); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif name=="Naive Bayes":
-                m=GaussianNB(); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif name=="KNN":
-                m=KNeighborsClassifier(); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif name=="SVM":
-                m=SVC(probability=True); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif name=="MLP":
-                m=MLPClassifier(max_iter=300); m.fit(X_train,y_train); yp=m.predict(X_test)
-            elif USE_TF and name=="Deep MLP":
-                m=build_deep_mlp(X_train.shape[1]); m.fit(X_train,y_train,epochs=10,batch_size=32,verbose=0); yp=(m.predict(X_test)>0.5).astype(int)
-            elif USE_TF and name=="1D-CNN":
-                m=build_cnn_1d(X_train.shape[1]); m.fit(X_train,y_train,epochs=5,batch_size=32,verbose=0); yp=(m.predict(X_test)>0.5).astype(int)
-            elif USE_TF and name=="BiLSTM":
-                m=build_lstm(X_train.shape[1],bidirectional=True); m.fit(X_train,y_train,epochs=5,batch_size=32,verbose=0); yp=(m.predict(X_test)>0.5).astype(int)
-            elif USE_TF and name=="BiLSTM+Attention":
-                m=build_lstm(X_train.shape[1],bidirectional=True,use_attention=True); m.fit(X_train,y_train,epochs=5,batch_size=32,verbose=0); yp=(m.predict(X_test)>0.5).astype(int)
-            elif USE_TF and name=="Autoencoder-Finetune":
-                m=build_autoencoder(X_train.shape[1]); m.fit(X_train,X_train,epochs=10,batch_size=32,verbose=0); recon=m.predict(X_test); err=np.mean((recon-X_test)**2,axis=1); thr=np.percentile(err,95); yp=(err>thr).astype(int)
-            else: continue
-            results[name] = compute_metrics(y_test,yp)
-
-        if hybrid:
-            st.subheader("Hybrid Ensemble Results")
-            # simple Voting
-            votes = []
-            for name in chosen:
-                if name in results: continue
-            st.write("Hybrid logic simplified: showing individual metrics above.")
-        else:
-            st.subheader("Supervised Results")
-            for name,vals in results.items():
-                acc,prec,rec,f1,rmse = vals
-                st.write(f"**{name}** — Acc:{acc:.3f} Prec:{prec:.3f} Rec:{rec:.3f} F1:{f1:.3f} RMSE:{rmse:.3f}")
-
-        draw_visualizations(df, graph_choices, "Supervised Data", x=None,y=label_col)
+            chosen_models = st.sidebar.selectbox("Choose One Supervised Model", supervised_models)
 
     else:
-        # Unsupervised
-        results={}
-        for name in chosen:
-            if name=="Isolation Forest":
-                m=IsolationForest(contamination=contamination); pred=m.fit_predict(X_scaled); labels=np.where(pred==-1,"Attack","Normal")
-            elif name=="One-Class SVM":
-                m=OneClassSVM(nu=contamination); pred=m.fit_predict(X_scaled); labels=np.where(pred==-1,"Attack","Normal")
-            elif name=="KMeans":
-                m=KMeans(n_clusters=2,random_state=42); cl=m.fit_predict(X_scaled); small=pd.Series(cl).value_counts().idxmin(); labels=np.where(cl==small,"Attack","Normal")
-            elif name=="DBSCAN":
-                m=DBSCAN(); cl=m.fit_predict(X_scaled); labels=np.where(cl==-1,"Attack","Normal")
-            elif name=="PCA":
-                m=PCA(n_components=2); cl=m.fit_transform(X_scaled); labels=np.where(cl[:,0]>np.median(cl[:,0]),"Attack","Normal")
-            elif USE_TF and name=="Autoencoder":
-                m=build_autoencoder(X_scaled.shape[1]); m.fit(X_scaled,X_scaled,epochs=10,batch_size=32,verbose=0); recon=m.predict(X_scaled); err=np.mean((recon-X_scaled)**2,axis=1); thr=np.percentile(err,100*(1-contamination)); labels=np.where(err>thr,"Attack","Normal")
-            else: continue
-            vc=pd.Series(labels).value_counts(normalize=True)*100
-            st.write(f"**{name}** — Attack:{vc.get('Attack',0):.2f}% Normal:{vc.get('Normal',0):.2f}%")
-            df[name+"_Pred"]=labels
+        unsupervised_models = ["KMeans", "DBSCAN", "Isolation Forest", "One-Class SVM"]
+        if USE_TF:
+            unsupervised_models += ["Autoencoder"]
 
-        draw_visualizations(df, graph_choices, "Unsupervised Data")
+        if hybrid_mode:
+            chosen_models = st.sidebar.multiselect("Choose Unsupervised Models", unsupervised_models)
+        else:
+            chosen_models = st.sidebar.selectbox("Choose One Unsupervised Model", unsupervised_models)
+
+    # Visualization selection
+    multi_graph = st.sidebar.checkbox("Enable Multiple Graphs?", value=False)
+    graph_options = ["Confusion Matrix", "Bar Chart", "Pie Chart", "Line Chart", "Histogram", "Box Plot"]
+
+    if multi_graph:
+        chosen_graphs = st.sidebar.multiselect("Choose Visualizations", graph_options)
+    else:
+        chosen_graphs = [st.sidebar.selectbox("Choose One Visualization", graph_options)]
+
+    run_btn = st.sidebar.button("🚀 Run Models")
+
+    # --------------------
+    # Run Logic
+    # --------------------
+    if run_btn and chosen_models:
+        X_proc, y = preprocess_data(df, label_col)
+
+        # --------------------
+        # Supervised
+        # --------------------
+        if dataset_type == "Supervised":
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_proc, y, test_size=0.3, random_state=42, stratify=y
+            )
+
+            for model_name in chosen_models:
+                st.subheader(f"Model: {model_name}")
+
+                if model_name == "Logistic Regression":
+                    model = LogisticRegression(max_iter=1000)
+                elif model_name == "Random Forest":
+                    model = RandomForestClassifier(n_estimators=100)
+                elif model_name == "Decision Tree":
+                    model = DecisionTreeClassifier()
+                elif model_name == "KNN":
+                    model = KNeighborsClassifier()
+                elif model_name == "SVM":
+                    model = SVC()
+                elif model_name == "Naive Bayes":
+                    model = GaussianNB()
+                elif model_name == "Gradient Boosting":
+                    model = GradientBoostingClassifier()
+                elif model_name == "AdaBoost":
+                    model = AdaBoostClassifier()
+                elif USE_TF and model_name == "CNN":
+                    model = Sequential([
+                        Input(shape=(X_train.shape[1], 1)),
+                        Conv1D(32, 3, activation="relu"),
+                        MaxPooling1D(2),
+                        Flatten(),
+                        Dense(64, activation="relu"),
+                        Dense(1, activation="sigmoid")
+                    ])
+                    model.compile(optimizer=Adam(1e-3), loss="binary_crossentropy", metrics=["accuracy"])
+                    model.fit(np.expand_dims(X_train, -1), y_train, epochs=5, batch_size=32, verbose=0)
+                    y_pred = (model.predict(np.expand_dims(X_test, -1)) > 0.5).astype(int).flatten()
+                elif USE_TF and model_name == "LSTM":
+                    model = Sequential([
+                        Input(shape=(X_train.shape[1], 1)),
+                        LSTM(32),
+                        Dense(1, activation="sigmoid")
+                    ])
+                    model.compile(optimizer=Adam(1e-3), loss="binary_crossentropy", metrics=["accuracy"])
+                    model.fit(np.expand_dims(X_train, -1), y_train, epochs=5, batch_size=32, verbose=0)
+                    y_pred = (model.predict(np.expand_dims(X_test, -1)) > 0.5).astype(int).flatten()
+                else:
+                    continue
+
+                if model_name not in ["CNN", "LSTM"]:
+                    model.fit(X_train, y_train)
+                    y_pred = model.predict(X_test)
+
+                # Metrics
+                acc = accuracy_score(y_test, y_pred)
+                prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
+                rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+                f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+                rmse = mean_squared_error(y_test, y_pred, squared=False)
+
+                st.write({"Accuracy": acc, "Precision": prec, "Recall": rec, "F1": f1, "RMSE": rmse})
+
+                # Visualizations
+                for g in chosen_graphs:
+                    plot_visualization(g, y_test, y_pred, labels=y_pred)
+
+        # --------------------
+        # Unsupervised
+        # --------------------
+        else:
+            X_vals = X_proc.values
+            for model_name in chosen_models:
+                st.subheader(f"Model: {model_name}")
+
+                if model_name == "KMeans":
+                    model = KMeans(n_clusters=2, random_state=42)
+                    labels = model.fit_predict(X_vals)
+                elif model_name == "DBSCAN":
+                    model = DBSCAN(eps=0.5, min_samples=5)
+                    labels = model.fit_predict(X_vals)
+                elif model_name == "Isolation Forest":
+                    model = IsolationForest(contamination=0.1, random_state=42)
+                    labels = model.fit_predict(X_vals)
+                elif model_name == "One-Class SVM":
+                    model = OneClassSVM(nu=0.1, kernel="rbf")
+                    labels = model.fit_predict(X_vals)
+                elif USE_TF and model_name == "Autoencoder":
+                    model = Sequential([
+                        Dense(32, activation="relu", input_shape=(X_vals.shape[1],)),
+                        Dense(16, activation="relu"),
+                        Dense(32, activation="relu"),
+                        Dense(X_vals.shape[1], activation="linear")
+                    ])
+                    model.compile(optimizer="adam", loss="mse")
+                    model.fit(X_vals, X_vals, epochs=5, batch_size=32, verbose=0)
+                    recon = model.predict(X_vals)
+                    err = np.mean(np.square(recon - X_vals), axis=1)
+                    thr = np.percentile(err, 90)
+                    labels = np.where(err > thr, -1, 1)
+                else:
+                    continue
+
+                # Normalize labels to Attack/Normal
+                labels = np.where(labels == -1, "Attack", "Normal")
+
+                st.write(pd.Series(labels).value_counts())
+
+                # Visualizations
+                for g in chosen_graphs:
+                    plot_visualization(g, labels=labels)
+
+else:
+    st.info("👆 Upload a dataset to get started.")
