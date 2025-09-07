@@ -1,6 +1,6 @@
 # app.py
 """
-CYBER SHIELD (Final Version 🚀)
+CYBER SHIELD — Final Stable Version 🚀
 Mini Project Web App
 """
 
@@ -33,31 +33,45 @@ import seaborn as sns
 warnings.filterwarnings("ignore")
 
 # ---------------------------
-# Utility Functions
+# Label Auto-Detection
 # ---------------------------
-def find_label_candidates(df, keywords=None):
-    if keywords is None:
-        keywords = ["label","class","attack","target","category","type","y","outcome","result"]
-    scores = {}
+def detect_label_column(df):
+    keywords = ["label","class","attack","target","category","type","y","outcome","result"]
+    candidates = []
+
     for col in df.columns:
         norm = re.sub(r'[^0-9a-zA-Z]', ' ', str(col)).lower().strip()
+        # name match
         score = sum(1 for kw in keywords if kw in norm)
-        scores[col] = score
-    sorted_cands = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return sorted_cands
+
+        nunique = df[col].nunique(dropna=True)
+        # binary/low unique
+        if nunique <= 10:
+            score += 2
+        elif nunique <= max(0.05 * len(df), 20):
+            score += 1
+
+        candidates.append((col, score))
+
+    # sort by score
+    candidates = sorted(candidates, key=lambda x: x[1], reverse=True)
+    best = candidates[0] if candidates else None
+    if best and best[1] > 0:
+        return best[0]  # column name
+    else:
+        return None
 
 def clean_labels(y_raw):
     try:
         if y_raw.dtype == "object" or y_raw.dtype.name == "category":
             y, _ = pd.factorize(y_raw)
-            return y, "categorical"
+            return y
         y = pd.to_numeric(y_raw, errors="coerce")
         if y.isna().any():
             y = y.fillna(0)
-        return y.astype(int), "numeric"
-    except Exception as e:
-        st.warning(f"⚠️ Label cleaning failed: {e}. Switching to Unsupervised.")
-        return None, "failed"
+        return y.astype(int)
+    except:
+        return None
 
 def preprocess_data(df, drop_cols=None):
     df = df.copy()
@@ -93,7 +107,7 @@ def plot_visualization(data, labels, viz_type, title="Visualization"):
         pd.Series(labels).reset_index(drop=True).plot(kind="area", ax=ax)
     elif viz_type == "Scatter Plot":
         if isinstance(data, pd.DataFrame) and data.shape[1] >= 2:
-            ax.scatter(data.iloc[:,0], data.iloc[:,1], c=labels, cmap="coolwarm")
+            ax.scatter(data.iloc[:,0], data.iloc[:,1], c=pd.factorize(labels)[0], cmap="coolwarm")
         else:
             st.warning("Scatter requires at least 2 features.")
     ax.set_title(title)
@@ -108,7 +122,7 @@ st.title("🛡️ CYBER SHIELD — Intrusion Detection Web App")
 uploaded_file = st.file_uploader("📂 Upload dataset (CSV/XLSX)", type=["csv","xlsx"])
 
 if not uploaded_file:
-    st.info("Upload dataset to begin. Use demo data if needed.")
+    st.info("Upload dataset to begin.")
 else:
     try:
         if uploaded_file.name.endswith(".csv"):
@@ -125,14 +139,13 @@ else:
     # ---------------------------
     # Auto-detect supervised vs unsupervised
     # ---------------------------
-    candidates = find_label_candidates(df)
-    label_col = candidates[0][0] if candidates and candidates[0][1] > 0 else None
+    label_col = detect_label_column(df)
     if label_col:
-        y, label_type = clean_labels(df[label_col])
-        if y is None:
-            dataset_type = "Unsupervised"
-        else:
+        y = clean_labels(df[label_col])
+        if y is not None:
             dataset_type = "Supervised"
+        else:
+            dataset_type = "Unsupervised"
     else:
         dataset_type = "Unsupervised"
 
@@ -152,20 +165,14 @@ else:
             "SVM (RBF)","Naive Bayes","Gradient Boosting","AdaBoost","Ridge Classifier"
         ]
         chosen = st.sidebar.multiselect("Choose supervised models", models_sup, default=["Logistic Regression"])
-        if st.sidebar.checkbox("Hybrid (combine selected models)"):
-            chosen_hybrid = chosen
-        else:
-            chosen_hybrid = None
+        chosen_hybrid = st.sidebar.multiselect("Hybrid (combine models)", models_sup)
     else:
         models_unsup = [
             "Isolation Forest","One-Class SVM","KMeans","DBSCAN"
         ]
         chosen = st.sidebar.multiselect("Choose unsupervised models", models_unsup, default=["Isolation Forest"])
-        if st.sidebar.checkbox("Hybrid (combine selected models)"):
-            chosen_hybrid = chosen
-        else:
-            chosen_hybrid = None
-        contamination = st.sidebar.slider("Anomaly contamination (Isolation/OCSVM)", 0.01, 0.5, 0.05, 0.01)
+        chosen_hybrid = st.sidebar.multiselect("Hybrid (combine models)", models_unsup)
+        contamination = st.sidebar.slider("Anomaly contamination (for IsoForest/OCSVM)", 0.01, 0.5, 0.05, 0.01)
 
     viz_choice = st.sidebar.selectbox("Choose Visualization", viz_options)
     run = st.sidebar.button("🚀 Run Models")
@@ -177,13 +184,12 @@ else:
         if dataset_type == "Supervised":
             X = df.drop(columns=[label_col])
             X_processed, scaler = preprocess_data(X)
-            y, _ = clean_labels(df[label_col])
+            y = clean_labels(df[label_col])
 
             X_train, X_test, y_train, y_test = train_test_split(
                 X_processed, y, test_size=0.3, random_state=42, stratify=y
             )
 
-            results = {}
             for model in chosen:
                 if model == "Logistic Regression":
                     clf = LogisticRegression(max_iter=1000)
@@ -208,40 +214,20 @@ else:
 
                 clf.fit(X_train, y_train)
                 y_pred = clf.predict(X_test)
+
                 acc = accuracy_score(y_test, y_pred)
                 prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
                 rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
                 f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
                 rmse = mean_squared_error(y_test, y_pred, squared=False)
-                results[model] = (acc, prec, rec, f1, rmse)
 
                 st.subheader(f"📌 {model}")
                 st.write(f"Accuracy: {acc:.3f}, Precision: {prec:.3f}, Recall: {rec:.3f}, F1: {f1:.3f}, RMSE: {rmse:.3f}")
-
                 plot_visualization(y_test, y_pred, viz_choice, title=f"{model} - {viz_choice}")
-
-            # Hybrid (Voting)
-            if chosen_hybrid and len(chosen_hybrid) > 1:
-                st.subheader("🤝 Hybrid Model (Voting)")
-                estimators = []
-                for m in chosen_hybrid:
-                    if m == "Logistic Regression":
-                        estimators.append(("lr", LogisticRegression(max_iter=1000)))
-                    elif m == "Random Forest":
-                        estimators.append(("rf", RandomForestClassifier()))
-                    elif m == "SVM (RBF)":
-                        estimators.append(("svm", SVC(probability=True)))
-                if estimators:
-                    vote = VotingClassifier(estimators=estimators, voting="soft")
-                    vote.fit(X_train, y_train)
-                    y_pred = vote.predict(X_test)
-                    acc = accuracy_score(y_test, y_pred)
-                    st.write(f"Hybrid Accuracy: {acc:.3f}")
-                    plot_visualization(y_test, y_pred, viz_choice, title="Hybrid - "+viz_choice)
 
         else:  # Unsupervised
             X_processed, scaler = preprocess_data(df)
-            results = {}
+
             for model in chosen:
                 if model == "Isolation Forest":
                     clf = IsolationForest(contamination=contamination, random_state=42)
@@ -262,34 +248,3 @@ else:
                 st.subheader(f"📌 {model}")
                 st.write(pd.Series(y_pred).value_counts())
                 plot_visualization(df, y_pred, viz_choice, title=f"{model} - {viz_choice}")
-
-            # Hybrid Unsupervised → Majority Voting
-            if chosen_hybrid and len(chosen_hybrid) > 1:
-                st.subheader("🤝 Hybrid Unsupervised")
-                votes = pd.DataFrame()
-                for m in chosen_hybrid:
-                    if m == "Isolation Forest":
-                        clf = IsolationForest(contamination=contamination, random_state=42)
-                        votes[m] = np.where(clf.fit_predict(X_processed) == -1, "Attack", "Normal")
-                    elif m == "One-Class SVM":
-                        clf = OneClassSVM(nu=contamination, kernel="rbf", gamma="scale")
-                        votes[m] = np.where(clf.fit_predict(X_processed) == -1, "Attack", "Normal")
-                    elif m == "KMeans":
-                        clf = KMeans(n_clusters=2, random_state=42)
-                        votes[m] = np.where(clf.fit_predict(X_processed) == 1, "Attack", "Normal")
-                final_pred = votes.mode(axis=1)[0]
-                st.write(final_pred.value_counts())
-                plot_visualization(df, final_pred, viz_choice, title="Hybrid Unsupervised - "+viz_choice)
-
-# ---------------------------
-# Help
-# ---------------------------
-st.markdown("---")
-with st.expander("ℹ️ Help & Quickstart"):
-    st.write("""
-    1. Upload your dataset (CSV/XLSX).
-    2. The app auto-detects if it's **Supervised** (has labels) or **Unsupervised**.
-    3. Choose models from the sidebar (Hybrid = multiple models combined).
-    4. Run → View metrics, predictions, and visualizations.
-    5. Download results if needed.
-    """)
