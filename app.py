@@ -1,6 +1,6 @@
 # app.py
 """
-CYBERSHIELD — Deployable Web App with Error Logging
+CYBERSHIELD — Safe Deployable Web App
 """
 
 import streamlit as st
@@ -8,7 +8,7 @@ import traceback
 
 try:
     import os
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # silence TF logs
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
     import re
     import warnings
@@ -18,8 +18,8 @@ try:
     import pandas as pd
 
     from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler, LabelEncoder
-    from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, mean_squared_error
 
     # Classical ML models
@@ -30,15 +30,12 @@ try:
     from sklearn.neighbors import KNeighborsClassifier
     from sklearn.naive_bayes import GaussianNB
 
-    # Optional deep learning
-    USE_TF = False
-
     # Visualization
     import matplotlib.pyplot as plt
     import seaborn as sns
 
     # ---------------------------
-    # Utility
+    # Utilities
     # ---------------------------
     STRICT_LABEL_NAMES = {"label", "class", "target", "attack", "y", "output", "result"}
 
@@ -72,13 +69,6 @@ try:
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         return X_scaled, y
-
-    def preprocess_text(df, label_col=None):
-        text_col = df.select_dtypes(include="object").columns[0]
-        vectorizer = TfidfVectorizer(max_features=5000)
-        X = vectorizer.fit_transform(df[text_col].astype(str))
-        y = df[label_col] if label_col else None
-        return X, y
 
     def compute_supervised_metrics(y_true, y_pred):
         return {
@@ -138,13 +128,12 @@ try:
 
     # Sidebar
     st.sidebar.header("Options")
-
     if dtype == "Numerical":
-        models = ["Logistic Regression","Random Forest","Decision Tree","KNN","SVM","Naive Bayes","Gradient Boosting","AdaBoost"]
+        models = ["Logistic Regression","Random Forest","Decision Tree","KNN","SVM","Naive Bayes","Gradient Boosting","AdaBoost","Keras-MLP"]
     elif dtype == "Text":
         models = ["Naive Bayes (Text)","Logistic Regression (Text)","SVM (Text)","Random Forest (Text)"]
     elif dtype == "Image":
-        models = ["CNN-2D","ResNet50","MobileNetV2","VGG16"]
+        models = ["CNN-2D","ResNet50","MobileNetV2"]
 
     hybrid = st.sidebar.checkbox("Enable Hybrid (choose multiple models)?")
     if hybrid:
@@ -156,47 +145,105 @@ try:
     graphs = st.sidebar.multiselect("Choose graphs", ["Confusion Matrix","Histogram","Heatmap","Bar","Line","Pie"]) if multi_graph else [st.sidebar.selectbox("Choose one graph", ["Confusion Matrix","Histogram","Heatmap","Bar","Line","Pie"])]
 
     train_deep = st.sidebar.checkbox("Train deep models (if selected)")
-
     run_btn = st.sidebar.button("Run")
 
     # ---------------------------
     # Run
     # ---------------------------
     if run_btn:
-        if dtype == "Numerical" and not df.empty:
-            X, y = preprocess_numeric(df, label_col)
-            X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=0.3,random_state=42) if label_col else (X,None,None,None)
+        try:
+            if dtype == "Numerical" and not df.empty:
+                X, y = preprocess_numeric(df, label_col)
+                X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=0.3,random_state=42) if label_col else (X,None,None,None)
 
-            st.write("Models running...")
-            for m in chosen:
-                try:
-                    if m == "Logistic Regression":
-                        clf = LogisticRegression(max_iter=1000).fit(X_train,y_train); pred = clf.predict(X_test)
-                    elif m == "Random Forest":
-                        clf = RandomForestClassifier().fit(X_train,y_train); pred = clf.predict(X_test)
-                    elif m == "Decision Tree":
-                        clf = DecisionTreeClassifier().fit(X_train,y_train); pred = clf.predict(X_test)
-                    elif m == "KNN":
-                        clf = KNeighborsClassifier().fit(X_train,y_train); pred = clf.predict(X_test)
-                    elif m == "SVM":
-                        clf = SVC().fit(X_train,y_train); pred = clf.predict(X_test)
-                    elif m == "Naive Bayes":
-                        clf = GaussianNB().fit(X_train,y_train); pred = clf.predict(X_test)
-                    else:
-                        continue
+                st.write("X_train shape:", X_train.shape)
+                st.write("y_train shape:", y_train.shape if y_train is not None else None)
+                st.write("Classes:", np.unique(y_train) if y_train is not None else None)
 
-                    metrics = compute_supervised_metrics(y_test, pred)
-                    st.write(f"### {m} Results", metrics)
-                    if "Confusion Matrix" in graphs:
-                        plot_confusion(y_test, pred)
-                    for g in graphs:
-                        if g != "Confusion Matrix":
-                            plot_generic(pd.DataFrame(X_test), g, title=f"{m}-{g}")
-                except Exception as e:
-                    st.warning(f"{m} failed: {e}")
+                # Lazy import TensorFlow only if deep models are selected
+                USE_TF = False
+                if train_deep and any("Keras" in m for m in chosen):
+                    try:
+                        import tensorflow as tf
+                        from tensorflow.keras import Sequential
+                        from tensorflow.keras.layers import Dense
+                        USE_TF = True
+                        tf.get_logger().setLevel("ERROR")
+                    except Exception as e:
+                        st.warning(f"TensorFlow failed to import: {e}")
+                        USE_TF = False
 
-        else:
-            st.error("Text/Image dataset handling is placeholder in this version.")
+                st.write("Models running...")
+                for m in chosen:
+                    try:
+                        if m == "Logistic Regression":
+                            clf = LogisticRegression(max_iter=1000).fit(X_train,y_train)
+                            pred = clf.predict(X_test)
+                        elif m == "Random Forest":
+                            clf = RandomForestClassifier().fit(X_train,y_train)
+                            pred = clf.predict(X_test)
+                        elif m == "Decision Tree":
+                            clf = DecisionTreeClassifier().fit(X_train,y_train)
+                            pred = clf.predict(X_test)
+                        elif m == "KNN":
+                            clf = KNeighborsClassifier().fit(X_train,y_train)
+                            pred = clf.predict(X_test)
+                        elif m == "SVM":
+                            clf = SVC().fit(X_train,y_train)
+                            pred = clf.predict(X_test)
+                        elif m == "Naive Bayes":
+                            clf = GaussianNB().fit(X_train,y_train)
+                            pred = clf.predict(X_test)
+                        elif m == "Gradient Boosting":
+                            clf = GradientBoostingClassifier().fit(X_train,y_train)
+                            pred = clf.predict(X_test)
+                        elif m == "AdaBoost":
+                            clf = AdaBoostClassifier().fit(X_train,y_train)
+                            pred = clf.predict(X_test)
+                        elif USE_TF and m == "Keras-MLP":
+                            # Handle binary vs multi-class
+                            n_classes = len(np.unique(y_train))
+                            if n_classes > 2:
+                                activation = "softmax"
+                                loss = "sparse_categorical_crossentropy"
+                                output_units = n_classes
+                            else:
+                                activation = "sigmoid"
+                                loss = "binary_crossentropy"
+                                output_units = 1
+
+                            model = Sequential([
+                                Dense(128, activation="relu"),
+                                Dense(64, activation="relu"),
+                                Dense(output_units, activation=activation)
+                            ])
+                            model.compile(optimizer="adam", loss=loss, metrics=["accuracy"])
+                            model.fit(X_train, y_train, epochs=3, verbose=0)
+                            pred = model.predict(X_test)
+                            if n_classes > 2:
+                                pred = np.argmax(pred, axis=1)
+                            else:
+                                pred = (pred.ravel()>0.5).astype(int)
+                        else:
+                            st.warning(f"{m} skipped (unsupported or TF not available)")
+                            continue
+
+                        metrics = compute_supervised_metrics(y_test, pred)
+                        st.write(f"### {m} Results", metrics)
+                        if "Confusion Matrix" in graphs:
+                            plot_confusion(y_test, pred)
+                        for g in graphs:
+                            if g != "Confusion Matrix":
+                                plot_generic(pd.DataFrame(X_test), g, title=f"{m}-{g}")
+                    except Exception as e:
+                        st.warning(f"{m} failed: {traceback.format_exc()}")
+
+            else:
+                st.error("Text/Image dataset handling is placeholder in this version.")
+
+        except Exception as e:
+            st.error("Run block failed!")
+            st.text(traceback.format_exc())
 
 except Exception as e:
     st.error("An unexpected error occurred while running the app!")
