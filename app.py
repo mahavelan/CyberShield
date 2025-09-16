@@ -1,250 +1,250 @@
-# app.py
-"""
-CYBERSHIELD — Safe Deployable Web App
-"""
-
 import streamlit as st
-import traceback
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import SGDClassifier
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.decomposition import PCA
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction import FeatureHasher
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import DBSCAN
+import joblib
 
-try:
-    import os
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+# ----------------- CONFIG -----------------
+MAX_TRAIN_ROWS = 20000 # downsample for i3 machine
+HASHER_FEATURES = 32
+PCA_VARIANCE = 0.95
+LOW_CARDINALITY_THRESHOLD = 50
+HIGH_CARDINALITY_THRESHOLD = 200
 
-    import re
-    import warnings
-    warnings.filterwarnings("ignore")
+# ----------------- HELPERS -----------------
+def compute_metrics(y_true, y_pred):
+    return {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "recall": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1": f1_score(y_true, y_pred, average="weighted", zero_division=0)
+    }
 
-    import numpy as np
-    import pandas as pd
+def extract_timestamp_features(df, ts_col="Timestamp"):
+    if ts_col in df.columns:
+        try:
+            ts = pd.to_datetime(df[ts_col], errors="coerce")
+            df["ts_hour"] = ts.dt.hour.fillna(-1).astype(int)
+            df["ts_day"] = ts.dt.day.fillna(-1).astype(int)
+        except Exception:
+            df["ts_hour"] = -1
+            df["ts_day"] = -1
+    return df
 
-    from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, mean_squared_error
-
-    # Classical ML models
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.tree import DecisionTreeClassifier
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
-    from sklearn.svm import SVC
-    from sklearn.neighbors import KNeighborsClassifier
-    from sklearn.naive_bayes import GaussianNB
-
-    # Visualization
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    # ---------------------------
-    # Utilities
-    # ---------------------------
-    STRICT_LABEL_NAMES = {"label", "class", "target", "attack", "y", "output", "result"}
-
-    def normalize_name(colname: str) -> str:
-        return re.sub(r"[^0-9a-zA-Z]+", "", str(colname)).strip().lower()
-
-    def find_label_column_strict(df: pd.DataFrame):
-        for col in df.columns:
-            if normalize_name(col) in STRICT_LABEL_NAMES:
-                return col
-        return None
-
-    def detect_dataset_type(uploaded_file, df: pd.DataFrame):
-        name = uploaded_file.name.lower()
-        if name.endswith((".png", ".jpg", ".jpeg")):
-            return "Image"
-        text_like = sum([df[col].dtype == "object" for col in df.columns])
-        if text_like > len(df.columns) / 2:
-            return "Text"
-        return "Numerical"
-
-    def preprocess_numeric(df, label_col=None):
-        if label_col:
-            X = df.drop(columns=[label_col])
-            y = df[label_col]
+# ----------------- PREPROCESS -----------------
+def harmonize_and_preprocess(dfs, label_col="Label", sample_limit=MAX_TRAIN_ROWS, perform_pca=True):
+    df_all = pd.concat(dfs, ignore_index=True)
+    # Drop high-cardinality ID-like columns
+    drop_cols = ["Flow ID", "Source IP", "Destination IP"]
+    df_all = df_all.drop(columns=[c for c in drop_cols if c in df_all.columns], errors="ignore")
+    # Extract timestamp features
+    df_all = extract_timestamp_features(df_all, ts_col="Timestamp")
+    if "Timestamp" in df_all.columns:
+        df_all = df_all.drop(columns=["Timestamp"])
+    y = df_all[label_col] if label_col in df_all.columns else None
+    X = df_all.drop(columns=[label_col], errors="ignore")
+    # Replace infinities with NaN
+    X = X.replace([np.inf, -np.inf], np.nan)
+    object_cols = X.select_dtypes(include="object").columns.tolist()
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    low_card_cols = []
+    med_card_cols = []
+    high_card_cols = []
+    for col in object_cols:
+        nunq = X[col].nunique(dropna=True)
+        if nunq <= LOW_CARDINALITY_THRESHOLD:
+            low_card_cols.append(col)
+        elif nunq <= HIGH_CARDINALITY_THRESHOLD:
+            med_card_cols.append(col)
         else:
-            X = df.copy()
-            y = None
-        X = X.fillna(X.median(numeric_only=True))
-        X = pd.get_dummies(X, drop_first=True)
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        return X_scaled, y
-
-    def compute_supervised_metrics(y_true, y_pred):
-        return {
-            "accuracy": accuracy_score(y_true, y_pred),
-            "precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
-            "recall": recall_score(y_true, y_pred, average="weighted", zero_division=0),
-            "f1": f1_score(y_true, y_pred, average="weighted", zero_division=0),
-            "rmse": mean_squared_error(y_true, y_pred, squared=False),
-        }
-
-    def plot_confusion(y_true, y_pred, labels=None):
-        cm = confusion_matrix(y_true, y_pred)
-        fig, ax = plt.subplots()
-        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
-        ax.set_xlabel("Predicted")
-        ax.set_ylabel("Actual")
-        st.pyplot(fig)
-        plt.close(fig)
-
-    def plot_generic(df, kind, title=""):
-        fig, ax = plt.subplots()
+            high_card_cols.append(col)
+    label_encoders = {}
+    for col in med_card_cols:
+        le = LabelEncoder()
+        X[col] = X[col].astype(str).fillna("nan")
+        X[col] = le.fit_transform(X[col])
+        label_encoders[col] = le
+    # Column transformer for numeric + one-hot
+    numeric_pipeline = Pipeline([("impute", SimpleImputer(strategy="median"))])
+    transformers = []
+    if numeric_cols:
+        transformers.append(("num", numeric_pipeline, numeric_cols))
+    if low_card_cols:
+        transformers.append(("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=False), low_card_cols))
+    column_transformer = ColumnTransformer(transformers, remainder="drop", sparse_threshold=0)
+    X_proc = column_transformer.fit_transform(X)
+    # Add medium-card cols
+    if med_card_cols:
+        X_med = X[med_card_cols].to_numpy(dtype=float)
+        X_proc = np.hstack([X_proc, X_med]) if X_proc.size else X_med
+    # Add high-card hashed features
+    if high_card_cols:
+        rows = X[high_card_cols].fillna("nan").astype(str).apply(lambda r: [f"{c}={r[c]}" for c in high_card_cols], axis=1)
+        hasher = FeatureHasher(n_features=HASHER_FEATURES, input_type='string')
+        X_hash = hasher.transform(rows).toarray()
+        X_proc = np.hstack([X_proc, X_hash]) if X_proc.size else X_hash
+    # Sample to limit
+    if sample_limit and X_proc.shape[0] > sample_limit:
+        if y is not None:
+            stratify = y if len(y.unique()) > 1 else None
+            X_proc, _, y, _ = train_test_split(X_proc, y, train_size=sample_limit, stratify=stratify, random_state=42)
+        else:
+            X_proc, _ = train_test_split(X_proc, train_size=sample_limit, random_state=42)
+    # PCA
+    if perform_pca and X_proc.shape[1] > 50:
         try:
-            if kind == "Histogram":
-                df.hist(ax=ax)
-            elif kind == "Heatmap":
-                sns.heatmap(df.corr(numeric_only=True), cmap="coolwarm", ax=ax)
-            elif kind == "Bar":
-                df.sum().plot(kind="bar", ax=ax)
-            elif kind == "Line":
-                df.plot(ax=ax)
-            elif kind == "Pie":
-                df.iloc[:,0].value_counts().plot(kind="pie", autopct="%1.1f%%", ax=ax)
-            st.pyplot(fig)
+            pca = PCA(n_components=PCA_VARIANCE, svd_solver='full')
+            X_final = pca.fit_transform(X_proc)
+        except Exception:
+            pca = PCA(n_components=30)
+            X_final = pca.fit_transform(X_proc)
+    else:
+        pca = None
+        X_final = X_proc
+    return X_final, (y.values if y is not None else None), {"pca": pca, "column_transformer": column_transformer, "label_encoders": label_encoders}
+
+# ----------------- SUPERVISED -----------------
+def train_supervised(X, y):
+    results = {}
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    models = {
+        "SGDClassifier": SGDClassifier(max_iter=1000, tol=1e-3),
+        "RandomForest": RandomForestClassifier(n_estimators=100, n_jobs=-1),
+        "GradientBoosting": GradientBoostingClassifier()
+    }
+    for name, clf in models.items():
+        try:
+            clf.fit(X_tr, y_tr)
+            pred = clf.predict(X_te)
+            results[name] = {
+                "metrics": compute_metrics(y_te, pred),
+                "model": clf,
+                "test_true": y_te,
+                "test_pred": pred
+            }
         except Exception as e:
-            st.warning(f"Plot failed: {e}")
-        plt.close(fig)
+            results[name] = {"error": str(e)}
+    return results
 
-    # ---------------------------
-    # Streamlit UI
-    # ---------------------------
-    st.set_page_config(page_title="CyberShield", layout="wide")
-    st.title("🛡 CyberShield — Multi-Dataset Intrusion Detection App")
+# ----------------- UNSUPERVISED -----------------
+def train_unsupervised(X, y=None):
+    res = {}
+    try:
+        iso = IsolationForest(n_estimators=100, contamination=0.01, random_state=42)
+        iso.fit(X)
+        res['isolation_forest'] = iso
+    except Exception as e:
+        res['isolation_forest_error'] = str(e)
+    try:
+        sample_size = min(30000, X.shape[0])
+        Xc = X[np.random.choice(X.shape[0], sample_size, replace=False)]
+        db = DBSCAN(eps=0.5, min_samples=5).fit(Xc)
+        res['dbscan'] = db
+    except Exception as e:
+        res['dbscan_error'] = str(e)
+    return res
 
-    uploaded = st.file_uploader("Upload your dataset (CSV, XLSX, TXT, JPG, PNG)", type=["csv","xlsx","txt","jpg","jpeg","png"])
-    if not uploaded:
-        st.stop()
+# ----------------- ATTACK SCENARIO MAPPING -----------------
+def map_attack_scenarios(y):
+    if y is None:
+        return None
+    mapping = {
+        "BENIGN": "No attack",
+        "DDoS": "Volumetric attack",
+        "DoS Hulk": "Application-layer DoS",
+        "PortScan": "Reconnaissance",
+        "FTP-Patator": "Brute force attack"
+    }
+    return [mapping.get(label, "Other/Unknown") for label in y]
 
-    if uploaded.name.endswith(("csv","xlsx","txt")):
-        df = pd.read_csv(uploaded) if uploaded.name.endswith("csv") else pd.read_excel(uploaded)
-        st.write("Dataset Preview", df.head())
-    else:
-        df = pd.DataFrame()  # placeholder for image/text
+# ----------------- STREAMLIT APP -----------------
+st.title("CyberShield: Supervised & Unsupervised Intrusion Detection")
 
-    label_col = find_label_column_strict(df) if not df.empty else None
-    dtype = detect_dataset_type(uploaded, df if not df.empty else pd.DataFrame())
-    st.info(f"Detected dataset type: **{dtype}**")
+uploaded_files = st.file_uploader("Upload one or more CSV datasets", type=["csv"], accept_multiple_files=True)
+run_btn = st.button("Run Models")
 
-    # Sidebar
-    st.sidebar.header("Options")
-    if dtype == "Numerical":
-        models = ["Logistic Regression","Random Forest","Decision Tree","KNN","SVM","Naive Bayes","Gradient Boosting","AdaBoost","Keras-MLP"]
-    elif dtype == "Text":
-        models = ["Naive Bayes (Text)","Logistic Regression (Text)","SVM (Text)","Random Forest (Text)"]
-    elif dtype == "Image":
-        models = ["CNN-2D","ResNet50","MobileNetV2"]
+if uploaded_files and run_btn:
+    dfs = [pd.read_csv(f) for f in uploaded_files]
+    st.write(f"Loaded {len(dfs)} dataset(s)")
 
-    hybrid = st.sidebar.checkbox("Enable Hybrid (choose multiple models)?")
-    if hybrid:
-        chosen = st.sidebar.multiselect("Choose 2+ models", models)
-    else:
-        chosen = [st.sidebar.selectbox("Choose ONE model", models)]
+    X, y, artifacts = harmonize_and_preprocess(dfs, label_col="Label", sample_limit=MAX_TRAIN_ROWS, perform_pca=True)
+    st.write("Processed shape:", X.shape)
 
-    multi_graph = st.sidebar.checkbox("Enable multiple visualizations?")
-    graphs = st.sidebar.multiselect("Choose graphs", ["Confusion Matrix","Histogram","Heatmap","Bar","Line","Pie"]) if multi_graph else [st.sidebar.selectbox("Choose one graph", ["Confusion Matrix","Histogram","Heatmap","Bar","Line","Pie"])]
+    if y is not None:
+        st.subheader("Supervised Results")
+        st.write("Label distribution:", pd.Series(y).value_counts().to_dict())
+        results = train_supervised(X, y)
+        for name, res in results.items():
+            if "metrics" in res:
+                st.subheader(f"{name} Results")
+                st.json(res["metrics"])
 
-    train_deep = st.sidebar.checkbox("Train deep models (if selected)")
-    run_btn = st.sidebar.button("Run")
+                # NEW: Show classified data predictions for this model
+                st.write(f"Classified test set for {name}:")
+                pred_df = pd.DataFrame({
+                    'True_Label': res["test_true"],
+                    'Predicted_Label': res["test_pred"]
+                })
+                st.dataframe(pred_df.head(50))  # Only show first 50 for readability
 
-    # ---------------------------
-    # Run
-    # ---------------------------
-    if run_btn:
-        try:
-            if dtype == "Numerical" and not df.empty:
-                X, y = preprocess_numeric(df, label_col)
-                X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=0.3,random_state=42) if label_col else (X,None,None,None)
-
-                st.write("X_train shape:", X_train.shape)
-                st.write("y_train shape:", y_train.shape if y_train is not None else None)
-                st.write("Classes:", np.unique(y_train) if y_train is not None else None)
-
-                # Lazy import TensorFlow only if deep models are selected
-                USE_TF = False
-                if train_deep and any("Keras" in m for m in chosen):
-                    try:
-                        import tensorflow as tf
-                        from tensorflow.keras import Sequential
-                        from tensorflow.keras.layers import Dense
-                        USE_TF = True
-                        tf.get_logger().setLevel("ERROR")
-                    except Exception as e:
-                        st.warning(f"TensorFlow failed to import: {e}")
-                        USE_TF = False
-
-                st.write("Models running...")
-                for m in chosen:
-                    try:
-                        if m == "Logistic Regression":
-                            clf = LogisticRegression(max_iter=1000).fit(X_train,y_train)
-                            pred = clf.predict(X_test)
-                        elif m == "Random Forest":
-                            clf = RandomForestClassifier().fit(X_train,y_train)
-                            pred = clf.predict(X_test)
-                        elif m == "Decision Tree":
-                            clf = DecisionTreeClassifier().fit(X_train,y_train)
-                            pred = clf.predict(X_test)
-                        elif m == "KNN":
-                            clf = KNeighborsClassifier().fit(X_train,y_train)
-                            pred = clf.predict(X_test)
-                        elif m == "SVM":
-                            clf = SVC().fit(X_train,y_train)
-                            pred = clf.predict(X_test)
-                        elif m == "Naive Bayes":
-                            clf = GaussianNB().fit(X_train,y_train)
-                            pred = clf.predict(X_test)
-                        elif m == "Gradient Boosting":
-                            clf = GradientBoostingClassifier().fit(X_train,y_train)
-                            pred = clf.predict(X_test)
-                        elif m == "AdaBoost":
-                            clf = AdaBoostClassifier().fit(X_train,y_train)
-                            pred = clf.predict(X_test)
-                        elif USE_TF and m == "Keras-MLP":
-                            # Handle binary vs multi-class
-                            n_classes = len(np.unique(y_train))
-                            if n_classes > 2:
-                                activation = "softmax"
-                                loss = "sparse_categorical_crossentropy"
-                                output_units = n_classes
-                            else:
-                                activation = "sigmoid"
-                                loss = "binary_crossentropy"
-                                output_units = 1
-
-                            model = Sequential([
-                                Dense(128, activation="relu"),
-                                Dense(64, activation="relu"),
-                                Dense(output_units, activation=activation)
-                            ])
-                            model.compile(optimizer="adam", loss=loss, metrics=["accuracy"])
-                            model.fit(X_train, y_train, epochs=3, verbose=0)
-                            pred = model.predict(X_test)
-                            if n_classes > 2:
-                                pred = np.argmax(pred, axis=1)
-                            else:
-                                pred = (pred.ravel()>0.5).astype(int)
-                        else:
-                            st.warning(f"{m} skipped (unsupported or TF not available)")
-                            continue
-
-                        metrics = compute_supervised_metrics(y_test, pred)
-                        st.write(f"### {m} Results", metrics)
-                        if "Confusion Matrix" in graphs:
-                            plot_confusion(y_test, pred)
-                        for g in graphs:
-                            if g != "Confusion Matrix":
-                                plot_generic(pd.DataFrame(X_test), g, title=f"{m}-{g}")
-                    except Exception as e:
-                        st.warning(f"{m} failed: {traceback.format_exc()}")
-
+                # Download option for classified results
+                csv = pred_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label=f"Download {name} Predictions as CSV",
+                    data=csv,
+                    file_name=f'{name}_test_predictions.csv',
+                    mime='text/csv'
+                )
             else:
-                st.error("Text/Image dataset handling is placeholder in this version.")
+                st.error(f"{name} failed: {res.get('error')}")
 
-        except Exception as e:
-            st.error("Run block failed!")
-            st.text(traceback.format_exc())
+        best_name = max([n for n in results if "metrics" in results[n]], key=lambda nm: results[n]["metrics"]["f1"], default=None)
+        if best_name:
+            joblib.dump(results[best_name]["model"], "best_model.joblib")
+            st.success(f"Best model saved: {best_name}")
 
-except Exception as e:
-    st.error("An unexpected error occurred while running the app!")
-    st.text(traceback.format_exc())
+        # Attack scenarios
+        scenarios = map_attack_scenarios(y)
+        if scenarios:
+            st.write("Attack scenario mapping (sample):", scenarios[:10])
+
+    st.subheader("Unsupervised Results")
+    unsup = train_unsupervised(X, y)
+    st.write({k: str(type(v)) if not isinstance(v, str) else v for k, v in unsup.items()})
+    import io
+
+    if 'isolation_forest' in unsup and hasattr(unsup['isolation_forest'], 'predict'):
+        iso_labels = unsup['isolation_forest'].predict(X)  # outlier labels: -1 (anomaly), 1 (normal)
+        st.write("Isolation Forest Predictions (sample):", iso_labels[:50])
+        iso_df = pd.DataFrame({'IsolationForest_Label': iso_labels})
+        iso_csv = iso_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Isolation Forest Results CSV",
+            data=iso_csv,
+            file_name='isolation_forest_results.csv',
+            mime='text/csv'
+        )
+
+    if 'dbscan' in unsup and hasattr(unsup['dbscan'], 'labels_'):
+        db_labels = unsup['dbscan'].labels_
+        st.write("DBSCAN Cluster Labels (sample):", db_labels[:50])
+        db_df = pd.DataFrame({'DBSCAN_Label': db_labels})
+        db_csv = db_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download DBSCAN Results CSV",
+            data=db_csv,
+            file_name='dbscan_results.csv',
+            mime='text/csv'
+        )
+# --------------------------------
