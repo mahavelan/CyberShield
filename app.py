@@ -1,30 +1,24 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, IsolationForest
 from sklearn.linear_model import SGDClassifier
+from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.impute import SimpleImputer
-from sklearn.decomposition import PCA
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.feature_extraction import FeatureHasher
-from sklearn.ensemble import IsolationForest
-from sklearn.cluster import DBSCAN
-import matplotlib.pyplot as plt
 import joblib
 
-# ----------------- CONFIG -----------------
+# ---------------- CONFIG ----------------
 MAX_TRAIN_ROWS = 20000
-HASHER_FEATURES = 32
-PCA_VARIANCE = 0.95
-LOW_CARDINALITY_THRESHOLD = 50
-HIGH_CARDINALITY_THRESHOLD = 200
-TOP_K_FOR_CHART = 15
+STRICT_LABEL_NAMES = {"label", "class", "attack", "target", "y"}
 
-# ----------------- HELPERS -----------------
+# ---------------- HELPERS ----------------
 def compute_metrics(y_true, y_pred):
     return {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -33,101 +27,41 @@ def compute_metrics(y_true, y_pred):
         "f1": f1_score(y_true, y_pred, average="weighted", zero_division=0)
     }
 
-def extract_timestamp_features(df, ts_col="Timestamp"):
-    if ts_col in df.columns:
-        try:
-            ts = pd.to_datetime(df[ts_col], errors="coerce")
-            df["ts_hour"] = ts.dt.hour.fillna(-1).astype(int)
-            df["ts_day"] = ts.dt.day.fillna(-1).astype(int)
-        except Exception:
-            df["ts_hour"] = -1
-            df["ts_day"] = -1
-    return df
+def detect_label_column(df: pd.DataFrame):
+    for col in df.columns:
+        if col.strip().lower() in STRICT_LABEL_NAMES:
+            return col
+    return None
 
-# ----------------- PREPROCESS -----------------
-def harmonize_and_preprocess(dfs, label_col="Label", sample_limit=MAX_TRAIN_ROWS, perform_pca=True):
-    df_all = pd.concat(dfs, ignore_index=True)
-    drop_cols = ["Flow ID", "Source IP", "Destination IP"]
-    df_all = df_all.drop(columns=[c for c in drop_cols if c in df_all.columns], errors="ignore")
-    df_all = extract_timestamp_features(df_all, ts_col="Timestamp")
-    if "Timestamp" in df_all.columns:
-        df_all = df_all.drop(columns=["Timestamp"])
-    y = df_all[label_col] if label_col in df_all.columns else None
-    X = df_all.drop(columns=[label_col], errors="ignore")
+def preprocess_data(df, label_col=None):
+    y = df[label_col] if label_col else None
+    X = df.drop(columns=[label_col], errors="ignore")
 
-    dtype_info = pd.DataFrame({'Column': X.columns, 'Type': [str(X[c].dtype) for c in X.columns]})
-    X = X.replace([np.inf, -np.inf], np.nan)
+    # Handle categorical & numeric separately
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
 
-    object_cols = X.select_dtypes(include="object").columns.tolist()
-    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-
-    low_card_cols, med_card_cols, high_card_cols = [], [], []
-    for col in object_cols:
-        nunq = X[col].nunique(dropna=True)
-        if nunq <= LOW_CARDINALITY_THRESHOLD:
-            low_card_cols.append(col)
-        elif nunq <= HIGH_CARDINALITY_THRESHOLD:
-            med_card_cols.append(col)
-        else:
-            high_card_cols.append(col)
-
-    label_encoders = {}
-    for col in med_card_cols:
-        le = LabelEncoder()
-        X[col] = X[col].astype(str).fillna("nan")
-        X[col] = le.fit_transform(X[col])
-        label_encoders[col] = le
-
-    numeric_pipeline = Pipeline([("impute", SimpleImputer(strategy="median"))])
     transformers = []
-    if numeric_cols:
-        transformers.append(("num", numeric_pipeline, numeric_cols))
-    if low_card_cols:
-        transformers.append(("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=False), low_card_cols))
+    if num_cols:
+        transformers.append(("num", SimpleImputer(strategy="median"), num_cols))
+    if cat_cols:
+        transformers.append(("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols))
 
-    column_transformer = ColumnTransformer(transformers, remainder="drop", sparse_threshold=0)
-    X_proc = column_transformer.fit_transform(X)
+    ct = ColumnTransformer(transformers, remainder="drop")
+    X_proc = ct.fit_transform(X)
 
-    if med_card_cols:
-        X_med = X[med_card_cols].to_numpy(dtype=float)
-        X_proc = np.hstack([X_proc, X_med]) if X_proc.size else X_med
-    if high_card_cols:
-        rows = X[high_card_cols].fillna("nan").astype(str).apply(
-            lambda r: [f"{c}={r[c]}" for c in high_card_cols], axis=1
-        )
-        hasher = FeatureHasher(n_features=HASHER_FEATURES, input_type='string')
-        X_hash = hasher.transform(rows).toarray()
-        X_proc = np.hstack([X_proc, X_hash]) if X_proc.size else X_hash
+    return X_proc, (y.values if y is not None else None)
 
-    if sample_limit and X_proc.shape[0] > sample_limit:
-        if y is not None:
-            stratify = y if len(pd.Series(y).unique()) > 1 else None
-            X_proc, _, y, _ = train_test_split(X_proc, y, train_size=sample_limit, stratify=stratify, random_state=42)
-        else:
-            X_proc, _ = train_test_split(X_proc, train_size=sample_limit, random_state=42)
-
-    pca = None
-    if perform_pca and X_proc.shape[1] > 50:
-        try:
-            pca = PCA(n_components=PCA_VARIANCE, svd_solver='full')
-            X_final = pca.fit_transform(X_proc)
-        except Exception:
-            pca = PCA(n_components=30)
-            X_final = pca.fit_transform(X_proc)
-    else:
-        X_final = X_proc
-
-    return X_final, (y.values if y is not None else None), {"pca": pca, "dtype_info": dtype_info, "df_all": df_all}
-
-# ----------------- SUPERVISED -----------------
+# ---------------- MODELS ----------------
 def train_supervised(X, y, selected_models):
     available_models = {
-        "SGDClassifier": SGDClassifier(max_iter=1000, tol=1e-3),
         "RandomForest": RandomForestClassifier(n_estimators=100, n_jobs=-1),
-        "GradientBoosting": GradientBoostingClassifier()
+        "GradientBoosting": GradientBoostingClassifier(),
+        "SGDClassifier": SGDClassifier(max_iter=1000, tol=1e-3)
     }
     results = {}
     X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
     for name in selected_models:
         clf = available_models[name]
         try:
@@ -135,6 +69,7 @@ def train_supervised(X, y, selected_models):
             pred = clf.predict(X_te)
             results[name] = {
                 "metrics": compute_metrics(y_te, pred),
+                "model": clf,
                 "test_true": y_te,
                 "test_pred": pred
             }
@@ -142,72 +77,80 @@ def train_supervised(X, y, selected_models):
             results[name] = {"error": str(e)}
     return results
 
-# ----------------- UNSUPERVISED -----------------
 def train_unsupervised(X):
-    res = {}
+    results = {}
     try:
-        iso = IsolationForest(n_estimators=100, contamination=0.01, random_state=42)
-        iso.fit(X)
-        res['isolation_forest'] = iso
+        iso = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+        iso_labels = iso.fit_predict(X)  # -1 = anomaly, 1 = normal
+        results["IsolationForest"] = iso_labels
     except Exception as e:
-        res['isolation_forest_error'] = str(e)
+        results["IsolationForest_error"] = str(e)
+
     try:
-        sample_size = min(30000, X.shape[0])
-        Xc = X[np.random.choice(X.shape[0], sample_size, replace=False)]
-        db = DBSCAN(eps=0.5, min_samples=5).fit(Xc)
-        res['dbscan'] = db
+        db = DBSCAN(eps=0.5, min_samples=5).fit(X)
+        results["DBSCAN"] = db.labels_  # -1 = anomaly
     except Exception as e:
-        res['dbscan_error'] = str(e)
-    return res
+        results["DBSCAN_error"] = str(e)
 
-# ----------------- STREAMLIT APP -----------------
-st.title("CyberShield: Supervised & Unsupervised Intrusion Detection")
+    return results
 
-uploaded_files = st.file_uploader("Upload CSV datasets", type=["csv"], accept_multiple_files=True)
-
-selected_models = st.multiselect("Select supervised models to run", ["SGDClassifier", "RandomForest", "GradientBoosting"], default=["RandomForest"])
-selected_graph = st.selectbox("Select graph type for visualization", ["Bar", "Pie", "Scatter", "PCA"])
-run_btn = st.button("Run Models")
-
-if uploaded_files and run_btn:
-    dfs = [pd.read_csv(f) for f in uploaded_files]
-    X, y, artifacts = harmonize_and_preprocess(dfs, label_col="Label", sample_limit=MAX_TRAIN_ROWS, perform_pca=True)
-
-    st.write("Processed shape:", X.shape)
-    st.subheader("Data Type Recognition")
-    st.dataframe(artifacts["dtype_info"])
-
-    # Column visualization
-    df_all = artifacts["df_all"]
-    vis_col = st.selectbox("Select column for visualization", df_all.columns)
+# ---------------- VISUALIZATION ----------------
+def plot_distribution(labels, title="Data Distribution"):
     fig, ax = plt.subplots()
-    chart_data = get_chart_data(df_all[vis_col])
-    if selected_graph == "Bar":
-        chart_data.plot(kind="bar", ax=ax)
-    elif selected_graph == "Pie":
-        chart_data.plot(kind="pie", ax=ax, autopct='%1.1f%%')
-    elif selected_graph == "Scatter":
-        num_cols = df_all.select_dtypes(include=np.number).columns.tolist()
-        if vis_col in num_cols and len(num_cols) > 1:
-            other = [c for c in num_cols if c != vis_col][0]
-            ax.scatter(df_all[vis_col], df_all[other], alpha=0.5)
-    elif selected_graph == "PCA" and artifacts["pca"] is not None:
-        pc_df = pd.DataFrame(artifacts["pca"].transform(df_all.drop(columns=["Label"], errors="ignore")), columns=["PC1", "PC2"])
-        ax.scatter(pc_df["PC1"], pc_df["PC2"], alpha=0.5)
+    value_counts = pd.Series(labels).value_counts()
+    value_counts.plot(kind="pie", autopct="%1.1f%%", ax=ax)
+    ax.set_ylabel("")
+    ax.set_title(title)
     st.pyplot(fig)
 
-    # --- SUPERVISED ---
-    if y is not None:
-        st.subheader("Supervised Results")
-        results = train_supervised(X, y, selected_models)
-        for name, res in results.items():
-            if "metrics" in res:
-                st.write(f"### {name} Metrics")
-                st.json(res["metrics"])
-            else:
-                st.error(f"{name} failed: {res.get('error')}")
+# ---------------- STREAMLIT APP ----------------
+st.title("🛡 CyberShield — Intrusion Detection")
+
+uploaded_file = st.file_uploader("Upload CSV dataset", type=["csv"])
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    st.write("### Dataset Preview", df.head())
+
+    label_col = detect_label_column(df)
+    if label_col:
+        st.success(f"Detected **supervised dataset** with label column: `{label_col}`")
+        dtype = "supervised"
     else:
-        # --- UNSUPERVISED ---
-        st.subheader("Unsupervised Results")
-        unsup = train_unsupervised(X)
-        st.write({k: str(v) for k,v in unsup.items()})
+        st.warning("No label column detected → treating as **unsupervised dataset**")
+        dtype = "unsupervised"
+
+    run_btn = st.button("Run Analysis")
+    if run_btn:
+        X, y = preprocess_data(df, label_col if dtype == "supervised" else None)
+
+        if dtype == "supervised":
+            # Show real distribution
+            st.subheader("📊 Label Distribution (Normal vs Attack)")
+            plot_distribution(y, "Supervised Data Distribution")
+
+            # Train models
+            st.subheader("🤖 Supervised Model Results")
+            results = train_supervised(X, y, ["RandomForest", "GradientBoosting", "SGDClassifier"])
+            for name, res in results.items():
+                if "metrics" in res:
+                    st.write(f"### {name} Metrics")
+                    st.json(res["metrics"])
+                    pred_df = pd.DataFrame({"True": res["test_true"], "Predicted": res["test_pred"]})
+                    st.dataframe(pred_df.head(20))
+                else:
+                    st.error(f"{name} failed: {res.get('error')}")
+
+        else:
+            # Run unsupervised anomaly detection
+            st.subheader("📊 Anomaly Detection (Unsupervised)")
+            results = train_unsupervised(X)
+
+            if "IsolationForest" in results:
+                iso_labels = results["IsolationForest"]
+                plot_distribution(np.where(iso_labels == -1, "Attack/Anomaly", "Normal"),
+                                  "Unsupervised Data Distribution (Isolation Forest)")
+
+            if "DBSCAN" in results:
+                db_labels = results["DBSCAN"]
+                plot_distribution(np.where(db_labels == -1, "Attack/Anomaly", "Normal"),
+                                  "Unsupervised Data Distribution (DBSCAN)")
